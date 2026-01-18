@@ -648,6 +648,15 @@ fn commit_from_git_without_root_parent(
         author,
         committer,
         secure_sig,
+        // Hox metadata - None for git commits (will be set later if extra metadata exists)
+        hox_priority: None,
+        hox_status: None,
+        hox_agent: None,
+        hox_orchestrator: None,
+        hox_msg_to: None,
+        hox_msg_type: None,
+        hox_loop_iteration: None,
+        hox_loop_max_iterations: None,
     })
 }
 
@@ -1945,6 +1954,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
 
         let (initial_commit_id, _init_commit) =
@@ -2037,6 +2054,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2124,6 +2149,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2225,6 +2258,14 @@ mod tests {
             author: signature.clone(),
             committer: signature,
             secure_sig: None,
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
         let commit_id = backend.write_commit(commit, None).block_on().unwrap().0;
         let git_refs = git_repo.references().unwrap();
@@ -2306,6 +2347,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2349,6 +2398,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
 
         let mut signer = |data: &_| {
