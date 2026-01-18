@@ -62,6 +62,32 @@ pub struct Commit {
     pub committer: ::core::option::Option<commit::Signature>,
     #[prost(bytes = "vec", optional, tag = "9")]
     pub secure_sig: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Hox metadata (fields 11-18)
+    ///
+    /// 0=Critical, 1=High, 2=Medium, 3=Low
+    #[prost(int32, optional, tag = "11")]
+    pub hox_priority: ::core::option::Option<i32>,
+    /// "open", "in_progress", "blocked", "review", "done", "abandoned"
+    #[prost(string, optional, tag = "12")]
+    pub hox_status: ::core::option::Option<::prost::alloc::string::String>,
+    /// Agent identifier (e.g., "agent-42")
+    #[prost(string, optional, tag = "13")]
+    pub hox_agent: ::core::option::Option<::prost::alloc::string::String>,
+    /// Orchestrator identifier (e.g., "O-A-1")
+    #[prost(string, optional, tag = "14")]
+    pub hox_orchestrator: ::core::option::Option<::prost::alloc::string::String>,
+    /// Message target (supports glob patterns)
+    #[prost(string, optional, tag = "15")]
+    pub hox_msg_to: ::core::option::Option<::prost::alloc::string::String>,
+    /// "mutation", "info", "align_request"
+    #[prost(string, optional, tag = "16")]
+    pub hox_msg_type: ::core::option::Option<::prost::alloc::string::String>,
+    /// Current loop iteration (for Ralph-style loops)
+    #[prost(uint32, optional, tag = "17")]
+    pub hox_loop_iteration: ::core::option::Option<u32>,
+    /// Maximum loop iterations allowed
+    #[prost(uint32, optional, tag = "18")]
+    pub hox_loop_max_iterations: ::core::option::Option<u32>,
 }
 /// Nested message and enum types in `Commit`.
 pub mod commit {

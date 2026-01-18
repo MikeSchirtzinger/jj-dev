@@ -207,6 +207,15 @@ impl DetachedCommitBuilder {
             author: signature.clone(),
             committer: signature,
             secure_sig: None,
+            // Hox metadata - None for new commits
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
         let record_predecessors_in_commit = settings
             .get_bool("experimental.record-predecessors-in-commit")
