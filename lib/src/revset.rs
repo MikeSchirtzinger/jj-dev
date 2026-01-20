@@ -199,7 +199,8 @@ pub enum RevsetFilterPredicate {
     /// Custom predicates provided by extensions
     Extension(Arc<dyn RevsetFilterExtension>),
     // Hox metadata predicates
-    /// Commits with Hox priority matching the pattern (critical, high, medium, low)
+    /// Commits with Hox priority matching the pattern (critical, high, medium,
+    /// low)
     HoxPriority(StringExpression),
     /// Commits with Hox status matching the pattern
     HoxStatus(StringExpression),
