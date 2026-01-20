@@ -81,6 +81,38 @@ pub(crate) struct DescribeArgs {
     /// allow the message to be edited afterwards.
     #[arg(long)]
     editor: bool,
+
+    /// Set Hox priority (critical, high, medium, low)
+    #[arg(long, value_name = "PRIORITY")]
+    set_hox_priority: Option<String>,
+
+    /// Set Hox status (open, in_progress, blocked, review, done, abandoned)
+    #[arg(long, value_name = "STATUS")]
+    set_hox_status: Option<String>,
+
+    /// Set Hox agent identifier
+    #[arg(long, value_name = "AGENT")]
+    set_hox_agent: Option<String>,
+
+    /// Set Hox orchestrator identifier
+    #[arg(long, value_name = "ORCHESTRATOR")]
+    set_hox_orchestrator: Option<String>,
+
+    /// Set message target (supports wildcards like O-A-*)
+    #[arg(long, value_name = "TARGET")]
+    set_hox_msg_to: Option<String>,
+
+    /// Set message type (mutation, info, align_request)
+    #[arg(long, value_name = "TYPE")]
+    set_hox_msg_type: Option<String>,
+
+    /// Set loop iteration number
+    #[arg(long, value_name = "ITERATION")]
+    set_hox_loop_iteration: Option<u32>,
+
+    /// Set max loop iterations
+    #[arg(long, value_name = "MAX_ITERATIONS")]
+    set_hox_loop_max_iterations: Option<u32>,
 }
 
 #[instrument(skip_all)]
@@ -135,12 +167,88 @@ pub(crate) async fn cmd_describe(
             .map(join_message_paragraphs)
     };
 
+    let hox_priority = if let Some(priority) = &args.set_hox_priority {
+        let value = match priority.to_lowercase().as_str() {
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => {
+                return Err(user_error(format!(
+                    "Invalid priority: {priority}. Use: critical, high, medium, low"
+                )));
+            }
+        };
+        Some(value)
+    } else {
+        None
+    };
+
+    let hox_status = if let Some(status) = &args.set_hox_status {
+        let valid = ["open", "in_progress", "blocked", "review", "done", "abandoned"];
+        if !valid.contains(&status.as_str()) {
+            return Err(user_error(format!(
+                "Invalid status: {status}. Use: {}",
+                valid.join(", ")
+            )));
+        }
+        Some(status.clone())
+    } else {
+        None
+    };
+
+    let hox_msg_type = if let Some(msg_type) = &args.set_hox_msg_type {
+        let valid = ["mutation", "info", "align_request"];
+        if !valid.contains(&msg_type.as_str()) {
+            return Err(user_error(format!(
+                "Invalid message type: {msg_type}. Use: {}",
+                valid.join(", ")
+            )));
+        }
+        Some(msg_type.clone())
+    } else {
+        None
+    };
+
+    let has_hox_changes = hox_priority.is_some()
+        || hox_status.is_some()
+        || args.set_hox_agent.is_some()
+        || args.set_hox_orchestrator.is_some()
+        || args.set_hox_msg_to.is_some()
+        || hox_msg_type.is_some()
+        || args.set_hox_loop_iteration.is_some()
+        || args.set_hox_loop_max_iterations.is_some();
+
     let mut commit_builders = commits
         .iter()
         .map(|commit| {
             let mut commit_builder = tx.repo_mut().rewrite_commit(commit).detach();
             if let Some(description) = &shared_description {
                 commit_builder.set_description(description);
+            }
+            if let Some(priority) = hox_priority {
+                commit_builder.set_hox_priority(Some(priority));
+            }
+            if let Some(status) = &hox_status {
+                commit_builder.set_hox_status(Some(status.clone()));
+            }
+            if let Some(agent) = &args.set_hox_agent {
+                commit_builder.set_hox_agent(Some(agent.clone()));
+            }
+            if let Some(orchestrator) = &args.set_hox_orchestrator {
+                commit_builder.set_hox_orchestrator(Some(orchestrator.clone()));
+            }
+            if let Some(msg_to) = &args.set_hox_msg_to {
+                commit_builder.set_hox_msg_to(Some(msg_to.clone()));
+            }
+            if let Some(msg_type) = &hox_msg_type {
+                commit_builder.set_hox_msg_type(Some(msg_type.clone()));
+            }
+            if let Some(iteration) = args.set_hox_loop_iteration {
+                commit_builder.set_hox_loop_iteration(Some(iteration));
+            }
+            if let Some(max_iterations) = args.set_hox_loop_max_iterations {
+                commit_builder.set_hox_loop_max_iterations(Some(max_iterations));
             }
             commit_builder
         })
@@ -220,7 +328,7 @@ pub(crate) async fn cmd_describe(
     // `transform_descendants` below unnecessarily.
     let commit_builders: HashMap<_, _> = iter::zip(&commits, commit_builders)
         .filter(|(old_commit, commit_builder)| {
-            old_commit.description() != commit_builder.description()
+            old_commit.description() != commit_builder.description() || has_hox_changes
         })
         .map(|(old_commit, commit_builder)| (old_commit.id(), commit_builder))
         .collect();
@@ -242,6 +350,14 @@ pub(crate) async fn cmd_describe(
                 if let Some(temp_builder) = commit_builders.get(&old_commit_id) {
                     commit_builder
                         .set_description(temp_builder.description())
+                        .set_hox_priority(temp_builder.hox_priority())
+                        .set_hox_status(temp_builder.hox_status().map(str::to_owned))
+                        .set_hox_agent(temp_builder.hox_agent().map(str::to_owned))
+                        .set_hox_orchestrator(temp_builder.hox_orchestrator().map(str::to_owned))
+                        .set_hox_msg_to(temp_builder.hox_msg_to().map(str::to_owned))
+                        .set_hox_msg_type(temp_builder.hox_msg_type().map(str::to_owned))
+                        .set_hox_loop_iteration(temp_builder.hox_loop_iteration())
+                        .set_hox_loop_max_iterations(temp_builder.hox_loop_max_iterations())
                         .write()
                         .await?;
                     num_described += 1;
