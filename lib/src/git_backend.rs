@@ -754,6 +754,17 @@ fn serialize_extras(commit: &Commit) -> Vec<u8> {
     for predecessor in &commit.predecessors {
         proto.predecessors.push(predecessor.to_bytes());
     }
+
+    // Hox metadata
+    proto.hox_priority = commit.hox_priority;
+    proto.hox_status = commit.hox_status.clone();
+    proto.hox_agent = commit.hox_agent.clone();
+    proto.hox_orchestrator = commit.hox_orchestrator.clone();
+    proto.hox_msg_to = commit.hox_msg_to.clone();
+    proto.hox_msg_type = commit.hox_msg_type.clone();
+    proto.hox_loop_iteration = commit.hox_loop_iteration;
+    proto.hox_loop_max_iterations = commit.hox_loop_max_iterations;
+
     proto.encode_to_vec()
 }
 
@@ -776,6 +787,16 @@ fn deserialize_extras(commit: &mut Commit, bytes: &[u8]) {
     for predecessor in &proto.predecessors {
         commit.predecessors.push(CommitId::from_bytes(predecessor));
     }
+
+    // Hox metadata
+    commit.hox_priority = proto.hox_priority;
+    commit.hox_status = proto.hox_status;
+    commit.hox_agent = proto.hox_agent;
+    commit.hox_orchestrator = proto.hox_orchestrator;
+    commit.hox_msg_to = proto.hox_msg_to;
+    commit.hox_msg_type = proto.hox_msg_type;
+    commit.hox_loop_iteration = proto.hox_loop_iteration;
+    commit.hox_loop_max_iterations = proto.hox_loop_max_iterations;
 }
 
 /// Returns `RefEdit` that will create a ref in `refs/jj/keep` if not exist.

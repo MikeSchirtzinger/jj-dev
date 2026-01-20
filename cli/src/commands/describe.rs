@@ -122,6 +122,40 @@ pub(crate) struct DescribeArgs {
         value_parser = parse_author
     )]
     author: Option<(String, String)>,
+
+    // Hox metadata arguments
+
+    /// Set Hox priority (critical, high, medium, low)
+    #[arg(long, value_name = "PRIORITY")]
+    set_priority: Option<String>,
+
+    /// Set Hox status (open, in_progress, blocked, review, done, abandoned)
+    #[arg(long, value_name = "STATUS")]
+    set_status: Option<String>,
+
+    /// Set Hox agent identifier
+    #[arg(long, value_name = "AGENT")]
+    set_agent: Option<String>,
+
+    /// Set Hox orchestrator identifier
+    #[arg(long, value_name = "ORCHESTRATOR")]
+    set_orchestrator: Option<String>,
+
+    /// Set message target (supports wildcards like O-A-*)
+    #[arg(long, value_name = "TARGET")]
+    set_msg_to: Option<String>,
+
+    /// Set message type (mutation, info, align_request)
+    #[arg(long, value_name = "TYPE")]
+    set_msg_type: Option<String>,
+
+    /// Set loop iteration number
+    #[arg(long, value_name = "ITERATION")]
+    set_loop_iteration: Option<u32>,
+
+    /// Set max loop iterations
+    #[arg(long, value_name = "MAX_ITERATIONS")]
+    set_loop_max_iterations: Option<u32>,
 }
 
 #[instrument(skip_all)]
@@ -197,6 +231,65 @@ pub(crate) fn cmd_describe(
         None
     };
 
+    // Validate and parse Hox priority
+    let hox_priority = if let Some(priority) = &args.set_priority {
+        let p = match priority.to_lowercase().as_str() {
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => {
+                return Err(user_error(format!(
+                    "Invalid priority: {}. Use: critical, high, medium, low",
+                    priority
+                )))
+            }
+        };
+        Some(p)
+    } else {
+        None
+    };
+
+    // Validate Hox status
+    let hox_status = if let Some(status) = &args.set_status {
+        let valid = ["open", "in_progress", "blocked", "review", "done", "abandoned"];
+        if !valid.contains(&status.as_str()) {
+            return Err(user_error(format!(
+                "Invalid status: {}. Use: {}",
+                status,
+                valid.join(", ")
+            )));
+        }
+        Some(status.clone())
+    } else {
+        None
+    };
+
+    // Validate Hox msg_type
+    let hox_msg_type = if let Some(msg_type) = &args.set_msg_type {
+        let valid = ["mutation", "info", "align_request"];
+        if !valid.contains(&msg_type.as_str()) {
+            return Err(user_error(format!(
+                "Invalid message type: {}. Use: {}",
+                msg_type,
+                valid.join(", ")
+            )));
+        }
+        Some(msg_type.clone())
+    } else {
+        None
+    };
+
+    // Check if any Hox metadata was specified
+    let has_hox_changes = hox_priority.is_some()
+        || hox_status.is_some()
+        || args.set_agent.is_some()
+        || args.set_orchestrator.is_some()
+        || args.set_msg_to.is_some()
+        || hox_msg_type.is_some()
+        || args.set_loop_iteration.is_some()
+        || args.set_loop_max_iterations.is_some();
+
     let mut commit_builders = commits
         .iter()
         .map(|commit| {
@@ -215,6 +308,31 @@ pub(crate) fn cmd_describe(
                     timestamp: commit_builder.author().timestamp,
                 };
                 commit_builder.set_author(new_author);
+            }
+            // Apply Hox metadata
+            if let Some(priority) = hox_priority {
+                commit_builder.set_hox_priority(Some(priority));
+            }
+            if let Some(status) = &hox_status {
+                commit_builder.set_hox_status(Some(status.clone()));
+            }
+            if let Some(agent) = &args.set_agent {
+                commit_builder.set_hox_agent(Some(agent.clone()));
+            }
+            if let Some(orchestrator) = &args.set_orchestrator {
+                commit_builder.set_hox_orchestrator(Some(orchestrator.clone()));
+            }
+            if let Some(msg_to) = &args.set_msg_to {
+                commit_builder.set_hox_msg_to(Some(msg_to.clone()));
+            }
+            if let Some(msg_type) = &hox_msg_type {
+                commit_builder.set_hox_msg_type(Some(msg_type.clone()));
+            }
+            if let Some(iteration) = args.set_loop_iteration {
+                commit_builder.set_hox_loop_iteration(Some(iteration));
+            }
+            if let Some(max_iter) = args.set_loop_max_iterations {
+                commit_builder.set_hox_loop_max_iterations(Some(max_iter));
             }
             commit_builder
         })
@@ -297,6 +415,8 @@ pub(crate) fn cmd_describe(
                 // commit was discardable.
                 || old_commit.author().name != commit_builder.author().name
                 || old_commit.author().email != commit_builder.author().email
+                // Include commits if any Hox metadata was changed
+                || has_hox_changes
         })
         .map(|(old_commit, commit_builder)| (old_commit.id(), commit_builder))
         .collect();
@@ -320,6 +440,15 @@ pub(crate) fn cmd_describe(
                     .set_author(temp_builder.author().clone())
                     // Copy back committer for consistency with author timestamp
                     .set_committer(temp_builder.committer().clone())
+                    // Copy Hox metadata
+                    .set_hox_priority(temp_builder.hox_priority())
+                    .set_hox_status(temp_builder.hox_status().map(|s| s.to_string()))
+                    .set_hox_agent(temp_builder.hox_agent().map(|s| s.to_string()))
+                    .set_hox_orchestrator(temp_builder.hox_orchestrator().map(|s| s.to_string()))
+                    .set_hox_msg_to(temp_builder.hox_msg_to().map(|s| s.to_string()))
+                    .set_hox_msg_type(temp_builder.hox_msg_type().map(|s| s.to_string()))
+                    .set_hox_loop_iteration(temp_builder.hox_loop_iteration())
+                    .set_hox_loop_max_iterations(temp_builder.hox_loop_max_iterations())
                     .write()?;
                 num_described += 1;
             } else {

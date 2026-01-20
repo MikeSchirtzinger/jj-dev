@@ -843,6 +843,14 @@ Starts an editor to let you edit the description of changes. The editor will be 
 * `--editor` — Open an editor to edit the change description
 
    Forces an editor to open when using `--stdin` or `--message` to allow the message to be edited afterwards.
+* `--set-priority <PRIORITY>` — Set Hox priority (critical, high, medium, low)
+* `--set-status <STATUS>` — Set Hox status (open, in_progress, blocked, review, done, abandoned)
+* `--set-agent <AGENT>` — Set Hox agent identifier
+* `--set-orchestrator <ORCHESTRATOR>` — Set Hox orchestrator identifier
+* `--set-msg-to <TARGET>` — Set message target (supports wildcards like O-A-*)
+* `--set-msg-type <TYPE>` — Set message type (mutation, info, align_request)
+* `--set-loop-iteration <ITERATION>` — Set loop iteration number
+* `--set-loop-max-iterations <MAX_ITERATIONS>` — Set max loop iterations
 
 
 
