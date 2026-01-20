@@ -124,7 +124,6 @@ pub(crate) struct DescribeArgs {
     author: Option<(String, String)>,
 
     // Hox metadata arguments
-
     /// Set Hox priority (critical, high, medium, low)
     #[arg(long, value_name = "PRIORITY")]
     set_priority: Option<String>,
@@ -240,9 +239,8 @@ pub(crate) fn cmd_describe(
             "low" => 3,
             _ => {
                 return Err(user_error(format!(
-                    "Invalid priority: {}. Use: critical, high, medium, low",
-                    priority
-                )))
+                    "Invalid priority: {priority}. Use: critical, high, medium, low"
+                )));
             }
         };
         Some(p)
@@ -252,7 +250,14 @@ pub(crate) fn cmd_describe(
 
     // Validate Hox status
     let hox_status = if let Some(status) = &args.set_status {
-        let valid = ["open", "in_progress", "blocked", "review", "done", "abandoned"];
+        let valid = [
+            "open",
+            "in_progress",
+            "blocked",
+            "review",
+            "done",
+            "abandoned",
+        ];
         if !valid.contains(&status.as_str()) {
             return Err(user_error(format!(
                 "Invalid status: {}. Use: {}",

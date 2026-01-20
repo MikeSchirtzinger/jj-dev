@@ -1397,7 +1397,9 @@ fn build_predicate_fn(
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
-                Ok(commit.hox_orchestrator().is_some_and(|s| matcher.is_match(s)))
+                Ok(commit
+                    .hox_orchestrator()
+                    .is_some_and(|s| matcher.is_match(s)))
             })
         }
         RevsetFilterPredicate::HoxMsgTo(expression) => {

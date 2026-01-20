@@ -174,19 +174,19 @@ pub struct Commit {
     // Hox metadata (all optional for backwards compatibility)
     // Skipped from default serde to maintain backwards compatibility with existing tools
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_priority: Option<i32>,        // 0=Critical, 1=High, 2=Medium, 3=Low
+    pub hox_priority: Option<i32>, // 0=Critical, 1=High, 2=Medium, 3=Low
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_status: Option<String>,       // "open", "in_progress", "blocked", etc.
+    pub hox_status: Option<String>, // "open", "in_progress", "blocked", etc.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_agent: Option<String>,        // Agent identifier (e.g., "agent-42")
+    pub hox_agent: Option<String>, // Agent identifier (e.g., "agent-42")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hox_orchestrator: Option<String>, // Orchestrator identifier (e.g., "O-A-1")
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_msg_to: Option<String>,       // Message target (supports glob patterns)
+    pub hox_msg_to: Option<String>, // Message target (supports glob patterns)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_msg_type: Option<String>,     // "mutation", "info", "align_request"
+    pub hox_msg_type: Option<String>, // "mutation", "info", "align_request"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_loop_iteration: Option<u32>,  // Current loop iteration
+    pub hox_loop_iteration: Option<u32>, // Current loop iteration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hox_loop_max_iterations: Option<u32>, // Maximum loop iterations allowed
 }
