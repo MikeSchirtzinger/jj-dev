@@ -24,6 +24,93 @@
 
 </div>
 
+---
+
+## jj-dev: Parallel AI Agent Orchestration
+
+> **This fork extends jj for multi-agent AI coding systems.**
+
+### Why jj for AI Agents?
+
+Traditional VCS (git) breaks down when multiple AI agents work simultaneously:
+
+| Problem | Git | jj |
+|---------|-----|-----|
+| **Parallel edits** | Merge conflicts block agents | First-class conflict objects, auto-propagating resolution |
+| **Agent isolation** | Branch switching is destructive | Workspaces: each agent gets isolated working copy |
+| **Task tracking** | External issue trackers | Changes ARE tasks (DAG = dependency graph) |
+| **Atomic operations** | Index/staging complexity | Every working copy state is a commit |
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Hox Orchestrator                         │
+│                    (spawns agents, tracks tasks)             │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+│   Workspace   │     │   Workspace   │     │   Workspace   │
+│   agent-01    │     │   agent-02    │     │   agent-03    │
+│               │     │               │     │               │
+│  ┌─────────┐  │     │  ┌─────────┐  │     │  ┌─────────┐  │
+│  │ Change  │  │     │  │ Change  │  │     │  │ Change  │  │
+│  │ task-A  │  │     │  │ task-B  │  │     │  │ task-C  │  │
+│  └─────────┘  │     │  └─────────┘  │     │  └─────────┘  │
+└───────────────┘     └───────────────┘     └───────────────┘
+        │                     │                     │
+        └─────────────────────┴─────────────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │   Shared Repo     │
+                    │   (single .jj/)   │
+                    └───────────────────┘
+```
+
+**Key insight**: jj workspaces share a single `.jj/` store but provide isolated working directories. Agents can work in parallel without stepping on each other, and changes merge automatically when they don't conflict.
+
+### jj-dev Extensions (Planned)
+
+This fork adds **Hox metadata** to jj commits for orchestration:
+
+```bash
+# Assign task to agent with priority
+jj describe --set-priority high --set-status in_progress --set-agent agent-42
+
+# Query tasks by metadata
+jj log -r 'priority(high) & status(open)'
+
+# Find ready tasks (no blockers)
+jj log -r 'heads(status(open)) - conflicts()'
+
+# Orchestrator broadcasts decisions
+jj describe --mutation -m "MUTATION: use user_id as standard field"
+```
+
+**Metadata fields** (stored in commit, not description parsing):
+- `hox_priority` - Critical/High/Medium/Low
+- `hox_status` - Open/InProgress/Blocked/Review/Done/Abandoned
+- `hox_agent` - Assigned agent ID
+- `hox_orchestrator` - Supervising orchestrator
+- `hox_msg_to` / `hox_msg_type` - Inter-agent messaging
+
+See [Hox Specification](https://github.com/MikeSchirtzinger/hox/blob/main/docs/HOX_SPECIFICATION.md) for full details.
+
+### Building jj-dev
+
+```bash
+# Build with Hox extensions
+cargo build --release
+
+# Install as jj-dev (keeps vanilla jj available)
+cargo install --path cli --locked --bin jj
+mv ~/.cargo/bin/jj ~/.cargo/bin/jj-dev
+```
+
+---
+
 ## Introduction
 
 Jujutsu is a powerful [version control system](https://en.wikipedia.org/wiki/Version_control)
