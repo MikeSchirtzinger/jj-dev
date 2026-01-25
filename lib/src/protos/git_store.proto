@@ -28,4 +28,14 @@ message Commit {
 
   bool is_open = 8 [deprecated = true];
   bool is_pruned = 9 [deprecated = true];
+
+  // Hox metadata (fields 11-18)
+  optional int32 hox_priority = 11;           // 0=Critical, 1=High, 2=Medium, 3=Low
+  optional string hox_status = 12;            // "open", "in_progress", "blocked", "review", "done", "abandoned"
+  optional string hox_agent = 13;             // Agent identifier (e.g., "agent-42")
+  optional string hox_orchestrator = 14;      // Orchestrator identifier (e.g., "O-A-1")
+  optional string hox_msg_to = 15;            // Message target (supports glob patterns)
+  optional string hox_msg_type = 16;          // "mutation", "info", "align_request"
+  optional uint32 hox_loop_iteration = 17;    // Current loop iteration (for Ralph-style loops)
+  optional uint32 hox_loop_max_iterations = 18; // Maximum loop iterations allowed
 }

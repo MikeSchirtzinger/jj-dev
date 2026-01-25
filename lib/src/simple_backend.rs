@@ -367,6 +367,17 @@ pub fn commit_to_proto(commit: &Commit) -> crate::protos::simple_store::Commit {
     proto.description = commit.description.clone();
     proto.author = Some(signature_to_proto(&commit.author));
     proto.committer = Some(signature_to_proto(&commit.committer));
+
+    // Hox metadata
+    proto.hox_priority = commit.hox_priority;
+    proto.hox_status = commit.hox_status.clone();
+    proto.hox_agent = commit.hox_agent.clone();
+    proto.hox_orchestrator = commit.hox_orchestrator.clone();
+    proto.hox_msg_to = commit.hox_msg_to.clone();
+    proto.hox_msg_type = commit.hox_msg_type.clone();
+    proto.hox_loop_iteration = commit.hox_loop_iteration;
+    proto.hox_loop_max_iterations = commit.hox_loop_max_iterations;
+
     proto
 }
 
@@ -394,6 +405,15 @@ fn commit_from_proto(mut proto: crate::protos::simple_store::Commit) -> Commit {
         author: signature_from_proto(proto.author.unwrap_or_default()),
         committer: signature_from_proto(proto.committer.unwrap_or_default()),
         secure_sig,
+        // Hox metadata
+        hox_priority: proto.hox_priority,
+        hox_status: proto.hox_status,
+        hox_agent: proto.hox_agent,
+        hox_orchestrator: proto.hox_orchestrator,
+        hox_msg_to: proto.hox_msg_to,
+        hox_msg_type: proto.hox_msg_type,
+        hox_loop_iteration: proto.hox_loop_iteration,
+        hox_loop_max_iterations: proto.hox_loop_max_iterations,
     }
 }
 
@@ -527,6 +547,15 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            // Hox metadata
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {

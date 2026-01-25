@@ -160,6 +160,47 @@ impl CommitBuilder<'_> {
         self
     }
 
+    // Hox metadata setters
+    pub fn set_hox_priority(mut self, priority: Option<i32>) -> Self {
+        self.inner.set_hox_priority(priority);
+        self
+    }
+
+    pub fn set_hox_status(mut self, status: Option<String>) -> Self {
+        self.inner.set_hox_status(status);
+        self
+    }
+
+    pub fn set_hox_agent(mut self, agent: Option<String>) -> Self {
+        self.inner.set_hox_agent(agent);
+        self
+    }
+
+    pub fn set_hox_orchestrator(mut self, orchestrator: Option<String>) -> Self {
+        self.inner.set_hox_orchestrator(orchestrator);
+        self
+    }
+
+    pub fn set_hox_msg_to(mut self, msg_to: Option<String>) -> Self {
+        self.inner.set_hox_msg_to(msg_to);
+        self
+    }
+
+    pub fn set_hox_msg_type(mut self, msg_type: Option<String>) -> Self {
+        self.inner.set_hox_msg_type(msg_type);
+        self
+    }
+
+    pub fn set_hox_loop_iteration(mut self, iteration: Option<u32>) -> Self {
+        self.inner.set_hox_loop_iteration(iteration);
+        self
+    }
+
+    pub fn set_hox_loop_max_iterations(mut self, max_iterations: Option<u32>) -> Self {
+        self.inner.set_hox_loop_max_iterations(max_iterations);
+        self
+    }
+
     pub fn write(self) -> BackendResult<Commit> {
         self.inner.write(self.mut_repo)
     }
@@ -207,6 +248,15 @@ impl DetachedCommitBuilder {
             author: signature.clone(),
             committer: signature,
             secure_sig: None,
+            // Hox metadata - None for new commits
+            hox_priority: None,
+            hox_status: None,
+            hox_agent: None,
+            hox_orchestrator: None,
+            hox_msg_to: None,
+            hox_msg_type: None,
+            hox_loop_iteration: None,
+            hox_loop_max_iterations: None,
         };
         let record_predecessors_in_commit = settings
             .get_bool("experimental.record-predecessors-in-commit")
@@ -393,6 +443,80 @@ impl DetachedCommitBuilder {
     pub fn clear_sign_key(&mut self) -> &mut Self {
         self.sign_settings.key = None;
         self
+    }
+
+    // Hox metadata setters
+    pub fn set_hox_priority(&mut self, priority: Option<i32>) -> &mut Self {
+        self.commit.hox_priority = priority;
+        self
+    }
+
+    pub fn set_hox_status(&mut self, status: Option<String>) -> &mut Self {
+        self.commit.hox_status = status;
+        self
+    }
+
+    pub fn set_hox_agent(&mut self, agent: Option<String>) -> &mut Self {
+        self.commit.hox_agent = agent;
+        self
+    }
+
+    pub fn set_hox_orchestrator(&mut self, orchestrator: Option<String>) -> &mut Self {
+        self.commit.hox_orchestrator = orchestrator;
+        self
+    }
+
+    pub fn set_hox_msg_to(&mut self, msg_to: Option<String>) -> &mut Self {
+        self.commit.hox_msg_to = msg_to;
+        self
+    }
+
+    pub fn set_hox_msg_type(&mut self, msg_type: Option<String>) -> &mut Self {
+        self.commit.hox_msg_type = msg_type;
+        self
+    }
+
+    pub fn set_hox_loop_iteration(&mut self, iteration: Option<u32>) -> &mut Self {
+        self.commit.hox_loop_iteration = iteration;
+        self
+    }
+
+    pub fn set_hox_loop_max_iterations(&mut self, max_iterations: Option<u32>) -> &mut Self {
+        self.commit.hox_loop_max_iterations = max_iterations;
+        self
+    }
+
+    // Hox metadata getters
+    pub fn hox_priority(&self) -> Option<i32> {
+        self.commit.hox_priority
+    }
+
+    pub fn hox_status(&self) -> Option<&str> {
+        self.commit.hox_status.as_deref()
+    }
+
+    pub fn hox_agent(&self) -> Option<&str> {
+        self.commit.hox_agent.as_deref()
+    }
+
+    pub fn hox_orchestrator(&self) -> Option<&str> {
+        self.commit.hox_orchestrator.as_deref()
+    }
+
+    pub fn hox_msg_to(&self) -> Option<&str> {
+        self.commit.hox_msg_to.as_deref()
+    }
+
+    pub fn hox_msg_type(&self) -> Option<&str> {
+        self.commit.hox_msg_type.as_deref()
+    }
+
+    pub fn hox_loop_iteration(&self) -> Option<u32> {
+        self.commit.hox_loop_iteration
+    }
+
+    pub fn hox_loop_max_iterations(&self) -> Option<u32> {
+        self.commit.hox_loop_max_iterations
     }
 
     /// Writes new commit and makes it visible in the `mut_repo`.
