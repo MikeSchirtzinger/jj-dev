@@ -29,15 +29,16 @@ use crossterm::terminal::ClearType;
 use indoc::writedoc;
 use itertools::Itertools as _;
 use jj_lib::commit::Commit;
-use jj_lib::fmt_util::binary_prefix;
 use jj_lib::git;
 use jj_lib::git::FailedRefExportReason;
 use jj_lib::git::GitExportStats;
 use jj_lib::git::GitImportOptions;
 use jj_lib::git::GitImportStats;
+use jj_lib::git::GitProgress;
 use jj_lib::git::GitPushStats;
 use jj_lib::git::GitRefKind;
 use jj_lib::git::GitSettings;
+use jj_lib::git::GitSubprocessCallback;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::RemoteRef;
 use jj_lib::ref_name::RemoteRefSymbol;
@@ -123,6 +124,55 @@ pub fn get_remote_web_url(repo: &ReadonlyRepo, remote_name: &str) -> Option<Stri
     git_remote_url_to_web(url)
 }
 
+/// [`Ui`] adapter to forward Git command outputs.
+pub struct GitSubprocessUi<'a> {
+    ui: &'a Ui,
+    progress_output: Option<ProgressOutput<io::Stderr>>,
+    progress: Progress,
+    remote_sideband: GitSidebandProgressMessageWriter,
+}
+
+impl<'a> GitSubprocessUi<'a> {
+    pub fn new(ui: &'a Ui) -> Self {
+        Self {
+            ui,
+            progress_output: ui.progress_output(),
+            progress: Progress::new(Instant::now()),
+            remote_sideband: GitSidebandProgressMessageWriter::new(ui),
+        }
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.remote_sideband.flush(self.ui)
+    }
+}
+
+impl Drop for GitSubprocessUi<'_> {
+    fn drop(&mut self) {
+        self.flush().ok();
+    }
+}
+
+impl GitSubprocessCallback for GitSubprocessUi<'_> {
+    fn needs_progress(&self) -> bool {
+        self.progress_output.is_some()
+    }
+
+    fn progress(&mut self, progress: &GitProgress) -> io::Result<()> {
+        if let Some(output) = &mut self.progress_output {
+            self.progress.update(Instant::now(), progress, output)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn remote_sideband(&mut self, message: &[u8]) -> io::Result<()> {
+        // TODO: maybe progress should be temporarily cleared if there are
+        // sideband lines to write.
+        self.remote_sideband.write(self.ui, message)
+    }
+}
+
 // Based on Git's implementation: https://github.com/git/git/blob/43072b4ca132437f21975ac6acc6b72dc22fd398/sideband.c#L178
 pub struct GitSidebandProgressMessageWriter {
     display_prefix: &'static [u8],
@@ -204,29 +254,6 @@ impl GitSidebandProgressMessageWriter {
 
         Ok(())
     }
-}
-
-pub fn with_remote_git_callbacks<T>(ui: &Ui, f: impl FnOnce(git::RemoteCallbacks<'_>) -> T) -> T {
-    let mut callbacks = git::RemoteCallbacks::default();
-
-    let mut progress_callback;
-    if let Some(mut output) = ui.progress_output() {
-        let mut progress = Progress::new(Instant::now());
-        progress_callback = move |x: &git::Progress| {
-            progress.update(Instant::now(), x, &mut output).ok();
-        };
-        callbacks.progress = Some(&mut progress_callback);
-    }
-
-    let mut sideband_progress_writer = GitSidebandProgressMessageWriter::new(ui);
-    let mut sideband_progress_callback = |progress_message: &[u8]| {
-        sideband_progress_writer.write(ui, progress_message).ok();
-    };
-    callbacks.sideband_progress = Some(&mut sideband_progress_callback);
-
-    let result = f(callbacks);
-    sideband_progress_writer.flush(ui).ok();
-    result
 }
 
 pub fn load_git_import_options(
@@ -339,7 +366,6 @@ pub fn print_git_import_stats_summary(ui: &Ui, stats: &GitImportStats) -> Result
 
 pub struct Progress {
     next_print: Instant,
-    rate: RateEstimate,
     buffer: String,
     guard: Option<CleanupGuard>,
 }
@@ -348,7 +374,6 @@ impl Progress {
     pub fn new(now: Instant) -> Self {
         Self {
             next_print: now + crate::progress::INITIAL_DELAY,
-            rate: RateEstimate::new(),
             buffer: String::new(),
             guard: None,
         }
@@ -357,20 +382,17 @@ impl Progress {
     pub fn update<W: std::io::Write>(
         &mut self,
         now: Instant,
-        progress: &git::Progress,
+        progress: &GitProgress,
         output: &mut ProgressOutput<W>,
     ) -> io::Result<()> {
         use std::fmt::Write as _;
 
-        if progress.overall == 1.0 {
+        if progress.overall() == 1.0 {
             write!(output, "\r{}", Clear(ClearType::CurrentLine))?;
             output.flush()?;
             return Ok(());
         }
 
-        let rate = progress
-            .bytes_downloaded
-            .and_then(|x| self.rate.update(now, x));
         if now < self.next_print {
             return Ok(());
         }
@@ -388,15 +410,7 @@ impl Progress {
         // Overwrite the current local or sideband progress line if any.
         self.buffer.push('\r');
         let control_chars = self.buffer.len();
-        write!(self.buffer, "{: >3.0}% ", 100.0 * progress.overall).unwrap();
-        if let Some(total) = progress.bytes_downloaded {
-            let (scaled, prefix) = binary_prefix(total as f32);
-            write!(self.buffer, "{scaled: >5.1} {prefix}B ").unwrap();
-        }
-        if let Some(estimate) = rate {
-            let (scaled, prefix) = binary_prefix(estimate);
-            write!(self.buffer, "at {scaled: >5.1} {prefix}B/s ").unwrap();
-        }
+        write!(self.buffer, "{: >3.0}% ", 100.0 * progress.overall()).unwrap();
 
         let bar_width = output
             .term_width()
@@ -404,7 +418,7 @@ impl Progress {
             .unwrap_or(0)
             .saturating_sub(self.buffer.len() - control_chars + 2);
         self.buffer.push('[');
-        draw_progress(progress.overall, &mut self.buffer, bar_width);
+        draw_progress(progress.overall(), &mut self.buffer, bar_width);
         self.buffer.push(']');
 
         write!(self.buffer, "{}", Clear(ClearType::UntilNewLine)).unwrap();
@@ -431,57 +445,6 @@ fn draw_progress(progress: f32, buffer: &mut String, width: usize) {
     }
     for _ in (whole + 1)..width {
         buffer.push(CHARS[0]);
-    }
-}
-
-struct RateEstimate {
-    state: Option<RateEstimateState>,
-}
-
-impl RateEstimate {
-    pub fn new() -> Self {
-        Self { state: None }
-    }
-
-    /// Compute smoothed rate from an update
-    pub fn update(&mut self, now: Instant, total: u64) -> Option<f32> {
-        if let Some(ref mut state) = self.state {
-            return Some(state.update(now, total));
-        }
-
-        self.state = Some(RateEstimateState {
-            total,
-            avg_rate: None,
-            last_sample: now,
-        });
-        None
-    }
-}
-
-struct RateEstimateState {
-    total: u64,
-    avg_rate: Option<f32>,
-    last_sample: Instant,
-}
-
-impl RateEstimateState {
-    fn update(&mut self, now: Instant, total: u64) -> f32 {
-        let delta = total - self.total;
-        self.total = total;
-        let dt = now - self.last_sample;
-        self.last_sample = now;
-        let sample = delta as f32 / dt.as_secs_f32();
-        match self.avg_rate {
-            None => *self.avg_rate.insert(sample),
-            Some(ref mut avg_rate) => {
-                // From Algorithms for Unevenly Spaced Time Series: Moving
-                // Averages and Other Rolling Operators (Andreas Eckner, 2019)
-                const TIME_WINDOW: f32 = 2.0;
-                let alpha = 1.0 - (-dt.as_secs_f32() / TIME_WINDOW).exp();
-                *avg_rate += alpha * (sample - *avg_rate);
-                *avg_rate
-            }
-        }
     }
 }
 
@@ -773,16 +736,18 @@ mod tests {
         let start = Instant::now();
         let mut progress = Progress::new(start);
         let mut current_time = start;
-        let mut update = |duration, overall| -> String {
+        let mut update = |duration, overall: u64| -> String {
             current_time += duration;
             let mut buf = vec![];
             let mut output = ProgressOutput::for_test(&mut buf, 25);
             progress
                 .update(
                     current_time,
-                    &jj_lib::git::Progress {
-                        bytes_downloaded: None,
-                        overall,
+                    &GitProgress {
+                        deltas: (overall, 100),
+                        objects: (0, 0),
+                        counted_objects: (0, 0),
+                        compressed_objects: (0, 0),
                     },
                     &mut output,
                 )
@@ -790,16 +755,16 @@ mod tests {
             String::from_utf8(buf).unwrap()
         };
         // First output is after the initial delay
-        assert_snapshot!(update(crate::progress::INITIAL_DELAY - Duration::from_millis(1), 0.1), @"");
-        assert_snapshot!(update(Duration::from_millis(1), 0.10), @"\u{1b}[?25l\r 10% [█▊                ]\u{1b}[K");
+        assert_snapshot!(update(crate::progress::INITIAL_DELAY - Duration::from_millis(1), 1), @"");
+        assert_snapshot!(update(Duration::from_millis(1), 10), @"\u{1b}[?25l\r 10% [█▊                ]\u{1b}[K");
         // No updates for the next 30 milliseconds
-        assert_snapshot!(update(Duration::from_millis(10), 0.11), @"");
-        assert_snapshot!(update(Duration::from_millis(10), 0.12), @"");
-        assert_snapshot!(update(Duration::from_millis(10), 0.13), @"");
+        assert_snapshot!(update(Duration::from_millis(10), 11), @"");
+        assert_snapshot!(update(Duration::from_millis(10), 12), @"");
+        assert_snapshot!(update(Duration::from_millis(10), 13), @"");
         // We get an update now that we go over the threshold
-        assert_snapshot!(update(Duration::from_millis(100), 0.30), @"\r 30% [█████▍            ]\u{1b}[K");
+        assert_snapshot!(update(Duration::from_millis(100), 30), @"\r 30% [█████▍            ]\u{1b}[K");
         // Even though we went over by quite a bit, the new threshold is relative to the
         // previous output, so we don't get an update here
-        assert_snapshot!(update(Duration::from_millis(30), 0.40), @"");
+        assert_snapshot!(update(Duration::from_millis(30), 40), @"");
     }
 }

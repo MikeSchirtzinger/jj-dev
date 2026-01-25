@@ -26,6 +26,7 @@ use std::time::SystemTime;
 
 use assert_matches::assert_matches;
 use bstr::BString;
+use gix::odb::pack::FindExt as _;
 use indoc::indoc;
 use itertools::Itertools as _;
 use jj_lib::backend::CopyId;
@@ -39,6 +40,7 @@ use jj_lib::file_util::symlink_dir;
 use jj_lib::file_util::symlink_file;
 use jj_lib::files::FileMergeHunkLevel;
 use jj_lib::fsmonitor::FsmonitorSettings;
+use jj_lib::git::get_git_backend;
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::local_working_copy::LocalWorkingCopy;
 use jj_lib::local_working_copy::TreeState;
@@ -383,7 +385,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) {
                 // Not supported for now
                 assert!(maybe_metadata.is_err(), "{path:?} should not exist");
             }
-        };
+        }
     }
 }
 
@@ -2544,9 +2546,6 @@ fn track_ignored_with_flag_and_fsmonitor() {
     let gitignore_path = repo_path(".gitignore");
     testutils::write_working_copy_file(&workspace_root, ignored_path, "contents\n");
     testutils::write_working_copy_file(&workspace_root, gitignore_path, "*.ignored\n");
-    let base_ignores = GitIgnoreFile::empty()
-        .chain_with_file("", gitignore_path.to_fs_path_unchecked(&workspace_root))
-        .unwrap();
 
     let snapshot = |paths: &[&RepoPath], matcher: Option<&FilesMatcher>| {
         let changed_files = paths
@@ -2564,11 +2563,7 @@ fn track_ignored_with_flag_and_fsmonitor() {
             &settings,
         )
         .unwrap();
-        let base_ignores = base_ignores.clone();
-        let mut options = SnapshotOptions {
-            base_ignores,
-            ..empty_snapshot_options()
-        };
+        let mut options = empty_snapshot_options();
         if let Some(matcher) = matcher {
             options.force_tracking_matcher = matcher;
         }
@@ -2588,6 +2583,62 @@ fn track_ignored_with_flag_and_fsmonitor() {
     let tree_state = snapshot(&[], Some(&force_tracking_matcher));
 
     let expected_tree = create_tree(repo, &[(ignored_path, "contents\n")]);
+    assert_tree_eq!(*tree_state.current_tree(), expected_tree);
+}
+
+#[test]
+fn fsmonitor_gitignore_rescan_subtree() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let workspace_root = test_repo.env.root().join("workspace");
+    let state_path = test_repo.env.root().join("state");
+    std::fs::create_dir(&workspace_root).unwrap();
+    std::fs::create_dir(&state_path).unwrap();
+    let tree_state_settings = TreeStateSettings::try_from_user_settings(repo.settings()).unwrap();
+    TreeState::init(
+        repo.store().clone(),
+        workspace_root.clone(),
+        state_path.clone(),
+        &tree_state_settings,
+    )
+    .unwrap();
+
+    let ignored_path = repo_path("file.ignored");
+    let gitignore_path = repo_path(".gitignore");
+    testutils::write_working_copy_file(&workspace_root, ignored_path, "contents\n");
+    testutils::write_working_copy_file(&workspace_root, gitignore_path, "*.ignored\n");
+
+    let snapshot = |paths: &[&RepoPath]| {
+        let changed_files = paths
+            .iter()
+            .map(|p| p.to_fs_path_unchecked(Path::new("")))
+            .collect();
+        let settings = TreeStateSettings {
+            fsmonitor_settings: FsmonitorSettings::Test { changed_files },
+            ..tree_state_settings.clone()
+        };
+        let mut tree_state = TreeState::load(
+            repo.store().clone(),
+            workspace_root.clone(),
+            state_path.clone(),
+            &settings,
+        )
+        .unwrap();
+        tree_state
+            .snapshot(&empty_snapshot_options())
+            .block_on()
+            .unwrap();
+        tree_state.save().unwrap();
+        tree_state
+    };
+
+    let tree_state = snapshot(&[gitignore_path, ignored_path]);
+    let expected_tree = create_tree(repo, &[(gitignore_path, "*.ignored\n")]);
+    assert_tree_eq!(*tree_state.current_tree(), expected_tree);
+
+    testutils::write_working_copy_file(&workspace_root, gitignore_path, "");
+    let tree_state = snapshot(&[gitignore_path]);
+    let expected_tree = create_tree(repo, &[(gitignore_path, ""), (ignored_path, "contents\n")]);
     assert_tree_eq!(*tree_state.current_tree(), expected_tree);
 }
 
@@ -2845,4 +2896,23 @@ fn test_snapshot_and_update_valid_symlink(get_link_target: impl FnOnce(&Path, &P
         is_verbatim_path(&link_contents),
         "When we checkout a symlink to a verbatim path, it should still point to a verbatim path."
     );
+}
+
+#[test]
+fn test_always_store_empty_tree() {
+    let mut test_workspace = TestWorkspace::init_with_backend(TestRepoBackend::Git);
+    let git_backend = get_git_backend(test_workspace.repo.store()).unwrap();
+    let git_repo = git_backend.git_repo();
+    let empty_tree_id = gix::ObjectId::empty_tree(gix::hash::Kind::Sha1);
+
+    test_workspace.snapshot().unwrap();
+
+    let mut buf = Vec::new();
+    // Use objects.find as it doesn't short-circuit when asked for the empty tree
+    let (empty_tree, _) = git_repo
+        .objects
+        .find(&empty_tree_id, &mut buf)
+        .expect("empty tree should be stored in the git repo");
+    assert_eq!(empty_tree.kind, gix::objs::Kind::Tree);
+    assert!(empty_tree.data.is_empty());
 }

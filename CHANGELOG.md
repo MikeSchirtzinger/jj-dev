@@ -20,6 +20,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * Deprecated `ui.always-allow-large-revsets` setting and `all:` revset modifier
   have been removed.
 
+* Legacy placeholder support used for unset `user.name` or `user.email` has been
+  removed. Commits containing these values will now be pushed with `jj git push`
+  without producing an error.
+
+* If any side of a conflicted file is missing a terminating newline, then the
+  materialized file in the working copy will no longer be terminated by a
+  newline.
+
 ### Deprecations
 
 * The revset function `diff_contains()` has been renamed to `diff_lines()`.
@@ -30,6 +38,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   descriptions) by default, matching the `jj abandon` output format.
   [#3081](https://github.com/jj-vcs/jj/issues/3081)
 
+* `jj workspace root` now accepts an optional `--name` argument to show
+  the root path of the specified workspace (defaults to the current one). When
+  given a workspace that was created before this release, it errors out.
+
 * `jj git push --bookmark <name>` will now automatically track the bookmark if
   it isn't tracked with any remote already.
 
@@ -39,12 +51,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 * New `divergent()` revset function for divergent changes.
 
+* String pattern values in revsets and templates can now be substituted by
+  aliases. For example, `grep(x) = description(regex:x)` now works.
+
 * A new config option `remotes.<name>.auto-track-created-bookmarks` behaves
   similarly to `auto-track-bookmarks`, but it only applies to bookmarks created
   locally. Setting it to `"*"` is now the closest replacement for the deprecated
   `git.push-new-bookmarks` option.
 
 * `jj tag list` can now be filtered by revset.
+
+* Conflict markers will use LF or CRLF as the line ending according to the
+  contents of the file.
+  [#7376](https://github.com/jj-vcs/jj/issues/7376)
 
 ### Fixed bugs
 
@@ -64,6 +83,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configuration options which are set.
   [#7774](https://github.com/jj-vcs/jj/issues/7774)
 
+* Dynamic shell completion no longer attempts to resolve aliases at the
+  completion position. This previously prevented a fully-typed alias from
+  being accepted on some shells and replaced it entirely with its expansion on
+  bash. Now, the completion will only resolve the alias, and suggest candidates
+  accordingly, after the cursor has been advanced to the next position.
+  [#7773](https://github.com/jj-vcs/jj/issues/7773)
+
 * Setting the editor via `ui.editor`, `$EDITOR`, or `JJ_EDITOR` now respects shell quoting.
 
 * `jj gerrit upload` will no longer swallow errors and surface if changes fail
@@ -75,6 +101,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 * Conflict labels are now preserved correctly when restoring files from commits
   with different conflict labels.
+
+* The empty tree is now always written when the working copy is empty.
+  [#8480](https://github.com/jj-vcs/jj/issues/8480)
+
+* When using the Watchman filesystem monitor, changes to .gitignore now trigger
+  a scan of the affected subtree so newly unignored files are discovered.
+  [#8427](https://github.com/jj-vcs/jj/issues/8427)
 
 ## [0.37.0] - 2026-01-07
 

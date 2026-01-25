@@ -408,7 +408,7 @@ pub(crate) fn cmd_describe(
                 commit_builder.set_description(description);
             }
         }
-    };
+    }
 
     // Filter out unchanged commits to avoid rebasing descendants in
     // `transform_descendants` below unnecessarily.

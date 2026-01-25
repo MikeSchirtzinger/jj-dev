@@ -62,6 +62,7 @@ use jj_lib::working_copy::ResetError;
 use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::WorkingCopyStateError;
 use jj_lib::workspace::WorkspaceInitError;
+use jj_lib::workspace_store::WorkspaceStoreError;
 use thiserror::Error;
 
 use crate::cli_util::short_operation_hash;
@@ -181,13 +182,6 @@ impl ErrorWithMessage {
 
 pub fn user_error(err: impl Into<Box<dyn error::Error + Send + Sync>>) -> CommandError {
     CommandError::new(CommandErrorKind::User, err)
-}
-
-pub fn user_error_with_hint(
-    err: impl Into<Box<dyn error::Error + Send + Sync>>,
-    hint: impl Into<String>,
-) -> CommandError {
-    user_error(err).hinted(hint)
 }
 
 pub fn user_error_with_message(
@@ -342,6 +336,12 @@ impl From<OpHeadsStoreError> for CommandError {
     }
 }
 
+impl From<WorkspaceStoreError> for CommandError {
+    fn from(err: WorkspaceStoreError) -> Self {
+        internal_error_with_message("Unexpected error from workspace store", err)
+    }
+}
+
 impl From<WorkspaceInitError> for CommandError {
     fn from(err: WorkspaceInitError) -> Self {
         match err {
@@ -357,6 +357,9 @@ impl From<WorkspaceInitError> for CommandError {
             }
             WorkspaceInitError::OpHeadsStore(err) => {
                 user_error_with_message("Failed to record initial operation", err)
+            }
+            WorkspaceInitError::WorkspaceStore(err) => {
+                internal_error_with_message("Failed to record workspace path", err)
             }
             WorkspaceInitError::Backend(err) => {
                 user_error_with_message("Failed to access the repository", err)
@@ -489,14 +492,10 @@ impl From<MergeToolConfigError> for CommandError {
         match &err {
             MergeToolConfigError::MergeArgsNotConfigured { tool_name } => {
                 let tool_name = tool_name.clone();
-                user_error_with_hint(
-                    err,
-                    format!(
-                        "To use `{tool_name}` as a merge tool, the config \
-                         `merge-tools.{tool_name}.merge-args` must be defined (see docs for \
-                         details)"
-                    ),
-                )
+                user_error(err).hinted(format!(
+                    "To use `{tool_name}` as a merge tool, the config \
+                     `merge-tools.{tool_name}.merge-args` must be defined (see docs for details)"
+                ))
             }
             _ => user_error_with_message("Failed to load tool configuration", err),
         }
@@ -574,10 +573,9 @@ jj currently does not support partial clones. To use jj with this repository, tr
         fn from(err: GitFetchError) -> Self {
             match err {
                 GitFetchError::NoSuchRemote(_) => user_error(err),
-                GitFetchError::RemoteName(_) => user_error_with_hint(
-                    err,
-                    "Run `jj git remote rename` to give a different name.",
-                ),
+                GitFetchError::RemoteName(_) => {
+                    user_error(err).hinted("Run `jj git remote rename` to give a different name.")
+                }
                 GitFetchError::Subprocess(_) => user_error(err),
             }
         }
@@ -595,10 +593,8 @@ jj currently does not support partial clones. To use jj with this repository, tr
     impl From<GitRefExpansionError> for CommandError {
         fn from(err: GitRefExpansionError) -> Self {
             match &err {
-                GitRefExpansionError::Expression(_) => user_error_with_hint(
-                    err,
-                    "Specify patterns in `(positive | ...) & ~(negative | ...)` form.",
-                ),
+                GitRefExpansionError::Expression(_) => user_error(err)
+                    .hinted("Specify patterns in `(positive | ...) & ~(negative | ...)` form."),
                 GitRefExpansionError::InvalidBranchPattern(_) => user_error(err),
             }
         }
@@ -608,10 +604,9 @@ jj currently does not support partial clones. To use jj with this repository, tr
         fn from(err: GitPushError) -> Self {
             match err {
                 GitPushError::NoSuchRemote(_) => user_error(err),
-                GitPushError::RemoteName(_) => user_error_with_hint(
-                    err,
-                    "Run `jj git remote rename` to give a different name.",
-                ),
+                GitPushError::RemoteName(_) => {
+                    user_error(err).hinted("Run `jj git remote rename` to give a different name.")
+                }
                 GitPushError::Subprocess(_) => user_error(err),
                 GitPushError::UnexpectedBackend(_) => user_error(err),
             }
@@ -1100,7 +1095,7 @@ fn handle_clap_error(ui: &mut Ui, err: &clap::Error, hints: &[ErrorHint]) -> io:
         clap::error::ErrorKind::DisplayHelp
         | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => ui.request_pager(),
         _ => {}
-    };
+    }
     // Definitions for exit codes and streams come from
     // https://github.com/clap-rs/clap/blob/master/src/error/mod.rs
     match err.kind() {

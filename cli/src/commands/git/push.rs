@@ -45,7 +45,6 @@ use jj_lib::refs::LocalAndRemoteRef;
 use jj_lib::refs::classify_bookmark_push_action;
 use jj_lib::repo::Repo;
 use jj_lib::revset::RevsetExpression;
-use jj_lib::settings::UserSettings;
 use jj_lib::signing::SignBehavior;
 use jj_lib::str_util::StringExpression;
 use jj_lib::view::View;
@@ -60,13 +59,12 @@ use crate::command_error::CommandError;
 use crate::command_error::cli_error;
 use crate::command_error::cli_error_with_message;
 use crate::command_error::user_error;
-use crate::command_error::user_error_with_hint;
 use crate::command_error::user_error_with_message;
 use crate::commands::git::get_single_remote;
 use crate::complete;
 use crate::formatter::Formatter;
+use crate::git_util::GitSubprocessUi;
 use crate::git_util::print_push_stats;
-use crate::git_util::with_remote_git_callbacks;
 use crate::revset_util::parse_bookmark_name;
 use crate::revset_util::parse_union_name_patterns;
 use crate::ui::Ui;
@@ -464,15 +462,13 @@ pub fn cmd_git_push(
         branch_updates: bookmark_updates,
     };
     let git_settings = GitSettings::from_settings(tx.settings())?;
-    let push_stats = with_remote_git_callbacks(ui, |cb| {
-        git::push_branches(
-            tx.repo_mut(),
-            git_settings.to_subprocess_options(),
-            remote,
-            &targets,
-            cb,
-        )
-    })?;
+    let push_stats = git::push_branches(
+        tx.repo_mut(),
+        git_settings.to_subprocess_options(),
+        remote,
+        &targets,
+        &mut GitSubprocessUi::new(ui),
+    )?;
     print_push_stats(ui, &push_stats)?;
     // TODO: On partial success, locally-created --change/--named bookmarks will
     // be committed. It's probably better to remove failed local bookmarks.
@@ -539,13 +535,9 @@ fn validate_commits_ready_to_push(
             reasons.push("it has no description");
         }
         if commit.author().name.is_empty()
-            || commit.author().name == UserSettings::USER_NAME_PLACEHOLDER
             || commit.author().email.is_empty()
-            || commit.author().email == UserSettings::USER_EMAIL_PLACEHOLDER
             || commit.committer().name.is_empty()
-            || commit.committer().name == UserSettings::USER_NAME_PLACEHOLDER
             || commit.committer().email.is_empty()
-            || commit.committer().email == UserSettings::USER_EMAIL_PLACEHOLDER
         {
             reasons.push("it has no author and/or committer set");
         }
@@ -810,19 +802,20 @@ fn classify_bookmark_update(
 fn ensure_new_bookmark_name(repo: &dyn Repo, name: &RefName) -> Result<(), CommandError> {
     let symbol = name.as_symbol();
     if repo.view().get_local_bookmark(name).is_present() {
-        return Err(user_error_with_hint(
-            format!("Bookmark already exists: {symbol}"),
-            format!("Use 'jj bookmark move' to move it, and 'jj git push -b {symbol}' to push it"),
-        ));
+        return Err(
+            user_error(format!("Bookmark already exists: {symbol}")).hinted(format!(
+                "Use 'jj bookmark move' to move it, and 'jj git push -b {symbol}' to push it"
+            )),
+        );
     }
     if has_tracked_remote_bookmarks(repo, name) {
-        return Err(user_error_with_hint(
-            format!("Tracked remote bookmarks exist for deleted bookmark: {symbol}"),
-            format!(
-                "Use `jj bookmark set` to recreate the local bookmark. Run `jj bookmark untrack \
-                 {symbol}` to disassociate them."
-            ),
-        ));
+        return Err(user_error(format!(
+            "Tracked remote bookmarks exist for deleted bookmark: {symbol}"
+        ))
+        .hinted(format!(
+            "Use `jj bookmark set` to recreate the local bookmark. Run `jj bookmark untrack \
+             {symbol}` to disassociate them."
+        )));
     }
     Ok(())
 }
@@ -904,11 +897,11 @@ fn create_change_bookmarks(
 
     for (commit, name) in iter::zip(&all_commits, &bookmark_names) {
         let target = RefTarget::normal(commit.id().clone());
-        if tx.base_repo().view().get_local_bookmark(name) == &target {
+        if tx.repo().view().get_local_bookmark(name) == &target {
             // Existing bookmark pointing to the commit, which is allowed
             continue;
         }
-        ensure_new_bookmark_name(tx.base_repo().as_ref(), name)?;
+        ensure_new_bookmark_name(tx.repo(), name)?;
         writeln!(
             ui.status(),
             "Creating bookmark {name} for revision {change_id:.12}",

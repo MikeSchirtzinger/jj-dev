@@ -31,10 +31,8 @@ use crate::git::FetchTagsOverride;
 use crate::git::GitPushStats;
 use crate::git::GitSubprocessOptions;
 use crate::git::NegativeRefSpec;
-use crate::git::Progress;
 use crate::git::RefSpec;
 use crate::git::RefToPush;
-use crate::git::RemoteCallbacks;
 use crate::git_backend::GitBackend;
 use crate::ref_name::GitRefNameBuf;
 use crate::ref_name::RefNameBuf;
@@ -169,7 +167,7 @@ impl GitSubprocessContext {
         remote_name: &RemoteName,
         refspecs: &[RefSpec],
         negative_refspecs: &[NegativeRefSpec],
-        callbacks: &mut RemoteCallbacks<'_>,
+        callback: &mut dyn GitSubprocessCallback,
         depth: Option<NonZeroU32>,
         fetch_tags_override: Option<FetchTagsOverride>,
     ) -> Result<Option<String>, GitSubprocessError> {
@@ -181,7 +179,7 @@ impl GitSubprocessContext {
         // attempt to prune stale refs with --prune
         // --no-write-fetch-head ensures our request is invisible to other parties
         command.args(["fetch", "--prune", "--no-write-fetch-head"]);
-        if callbacks.progress.is_some() {
+        if callback.needs_progress() {
             command.arg("--progress");
         }
         if let Some(d) = depth {
@@ -204,7 +202,7 @@ impl GitSubprocessContext {
                 .chain(negative_refspecs.iter().map(|x| x.to_git_format())),
         );
 
-        let output = wait_with_progress(self.spawn_cmd(command)?, callbacks)?;
+        let output = wait_with_progress(self.spawn_cmd(command)?, callback)?;
 
         parse_git_fetch_output(output)
     }
@@ -265,7 +263,7 @@ impl GitSubprocessContext {
         &self,
         remote_name: &RemoteName,
         references: &[RefToPush],
-        callbacks: &mut RemoteCallbacks<'_>,
+        callback: &mut dyn GitSubprocessCallback,
     ) -> Result<GitPushStats, GitSubprocessError> {
         let mut command = self.create_command();
         command.stdout(Stdio::piped());
@@ -275,7 +273,7 @@ impl GitSubprocessContext {
         // https://github.com/jj-vcs/jj/issues/3577 and https://github.com/jj-vcs/jj/issues/405
         // offer more context
         command.args(["push", "--porcelain", "--no-verify"]);
-        if callbacks.progress.is_some() {
+        if callback.needs_progress() {
             command.arg("--progress");
         }
         command.args(
@@ -292,7 +290,7 @@ impl GitSubprocessContext {
                 .map(|r| r.refspec.to_git_format_not_forced()),
         );
 
-        let output = wait_with_progress(self.spawn_cmd(command)?, callbacks)?;
+        let output = wait_with_progress(self.spawn_cmd(command)?, callback)?;
 
         parse_git_push_output(output)
     }
@@ -590,6 +588,18 @@ fn parse_git_push_output(output: Output) -> Result<GitPushStats, GitSubprocessEr
     }
 }
 
+/// Handles Git command outputs.
+pub trait GitSubprocessCallback {
+    /// Whether to request progress information.
+    fn needs_progress(&self) -> bool;
+
+    /// Progress of local and remote operations.
+    fn progress(&mut self, progress: &GitProgress) -> io::Result<()>;
+
+    /// Sideband message received from remote.
+    fn remote_sideband(&mut self, message: &[u8]) -> io::Result<()>;
+}
+
 fn wait_with_output(child: Child) -> Result<Output, GitSubprocessError> {
     child.wait_with_output().map_err(GitSubprocessError::Wait)
 }
@@ -613,7 +623,7 @@ fn wait_with_output(child: Child) -> Result<Output, GitSubprocessError> {
 /// The returned `stderr` content does not include sideband messages.
 fn wait_with_progress(
     mut child: Child,
-    callbacks: &mut RemoteCallbacks<'_>,
+    callback: &mut dyn GitSubprocessCallback,
 ) -> Result<Output, GitSubprocessError> {
     let (stdout, stderr) = thread::scope(|s| -> io::Result<_> {
         drop(child.stdin.take());
@@ -624,7 +634,7 @@ fn wait_with_progress(
             child_stdout.read_to_end(&mut buf)?;
             Ok(buf)
         });
-        let stderr = read_to_end_with_progress(&mut child_stderr, callbacks)?;
+        let stderr = read_to_end_with_progress(&mut child_stderr, callback)?;
         let stdout = thread.join().expect("reader thread wouldn't panic")?;
         Ok((stdout, stderr))
     })
@@ -637,24 +647,27 @@ fn wait_with_progress(
     })
 }
 
-#[derive(Default)]
-struct GitProgress {
-    // (frac, total)
-    deltas: (u64, u64),
-    objects: (u64, u64),
-    counted_objects: (u64, u64),
-    compressed_objects: (u64, u64),
+/// Progress of underlying `git` command operation.
+#[derive(Clone, Debug, Default)]
+pub struct GitProgress {
+    /// `(frac, total)` of "Resolving deltas".
+    pub deltas: (u64, u64),
+    /// `(frac, total)` of "Receiving objects".
+    pub objects: (u64, u64),
+    /// `(frac, total)` of remote "Counting objects".
+    pub counted_objects: (u64, u64),
+    /// `(frac, total)` of remote "Compressing objects".
+    pub compressed_objects: (u64, u64),
 }
 
+// TODO: maybe let callers print each field separately and remove overall()?
 impl GitProgress {
-    fn to_progress(&self) -> Progress {
-        Progress {
-            bytes_downloaded: None,
-            overall: if self.total() != 0 {
-                self.fraction() as f32 / self.total() as f32
-            } else {
-                0.0
-            },
+    /// Overall progress normalized to 0 to 1 range.
+    pub fn overall(&self) -> f32 {
+        if self.total() != 0 {
+            self.fraction() as f32 / self.total() as f32
+        } else {
+            0.0
         }
     }
 
@@ -669,11 +682,11 @@ impl GitProgress {
 
 fn read_to_end_with_progress<R: Read>(
     src: R,
-    callbacks: &mut RemoteCallbacks<'_>,
+    callback: &mut dyn GitSubprocessCallback,
 ) -> io::Result<Vec<u8>> {
     let mut reader = BufReader::new(src);
     let mut data = Vec::new();
-    let mut git_progress = GitProgress::default();
+    let mut progress = GitProgress::default();
 
     loop {
         // progress sent through sideband channel may be terminated by \r
@@ -684,30 +697,28 @@ fn read_to_end_with_progress<R: Read>(
             break;
         }
 
-        if update_progress(line, &mut git_progress.objects, b"Receiving objects:")
-            || update_progress(line, &mut git_progress.deltas, b"Resolving deltas:")
+        // io::Error coming from callback shouldn't be propagated as an error of
+        // "read" operation. The error is suppressed for now.
+        if update_progress(line, &mut progress.objects, b"Receiving objects:")
+            || update_progress(line, &mut progress.deltas, b"Resolving deltas:")
             || update_progress(
                 line,
-                &mut git_progress.counted_objects,
+                &mut progress.counted_objects,
                 b"remote: Counting objects:",
             )
             || update_progress(
                 line,
-                &mut git_progress.compressed_objects,
+                &mut progress.compressed_objects,
                 b"remote: Compressing objects:",
             )
         {
-            if let Some(cb) = callbacks.progress.as_mut() {
-                cb(&git_progress.to_progress());
-            }
+            callback.progress(&progress).ok();
             data.truncate(start);
         } else if let Some(message) = line.strip_prefix(b"remote: ") {
-            if let Some(cb) = callbacks.sideband_progress.as_mut() {
-                let (body, term) = trim_sideband_line(message);
-                cb(body);
-                if let Some(term) = term {
-                    cb(&[term]);
-                }
+            let (body, term) = trim_sideband_line(message);
+            callback.remote_sideband(body).ok();
+            if let Some(term) = term {
+                callback.remote_sideband(&[term]).ok();
             }
             data.truncate(start);
         }
@@ -811,6 +822,28 @@ and the repository exists. "###;
 !\tdeadbeef:refs/heads/bookmark9\t[remote rejected]
 Done";
     const SAMPLE_OK_STDERR: &[u8] = b"";
+
+    #[derive(Debug, Default)]
+    struct GitSubprocessCapture {
+        progress: Vec<GitProgress>,
+        remote_sideband: Vec<Vec<u8>>,
+    }
+
+    impl GitSubprocessCallback for GitSubprocessCapture {
+        fn needs_progress(&self) -> bool {
+            true
+        }
+
+        fn progress(&mut self, progress: &GitProgress) -> io::Result<()> {
+            self.progress.push(progress.clone());
+            Ok(())
+        }
+
+        fn remote_sideband(&mut self, message: &[u8]) -> io::Result<()> {
+            self.remote_sideband.push(message.to_owned());
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_parse_no_such_remote() {
@@ -924,15 +957,9 @@ Done";
     #[test]
     fn test_read_to_end_with_progress() {
         let read = |sample: &[u8]| {
-            let mut progress = Vec::new();
-            let mut sideband = Vec::new();
-            let mut callbacks = RemoteCallbacks::default();
-            let mut progress_cb = |p: &Progress| progress.push(p.clone());
-            callbacks.progress = Some(&mut progress_cb);
-            let mut sideband_cb = |s: &[u8]| sideband.push(s.to_owned());
-            callbacks.sideband_progress = Some(&mut sideband_cb);
-            let output = read_to_end_with_progress(&mut &sample[..], &mut callbacks).unwrap();
-            (output, sideband, progress)
+            let mut callback = GitSubprocessCapture::default();
+            let output = read_to_end_with_progress(&mut &sample[..], &mut callback).unwrap();
+            (output, callback.remote_sideband, callback.progress)
         };
         const DUMB_SUFFIX: &str = "        ";
         let sample = formatdoc! {"
@@ -953,11 +980,25 @@ Done";
             .map(|s| s.as_bytes().to_owned())
         );
         assert_eq!(output, b"blah blah\nsome error message\n");
-        insta::assert_debug_snapshot!(progress, @r"
+        insta::assert_debug_snapshot!(progress, @"
         [
-            Progress {
-                bytes_downloaded: None,
-                overall: 0.5,
+            GitProgress {
+                deltas: (
+                    12,
+                    24,
+                ),
+                objects: (
+                    0,
+                    0,
+                ),
+                counted_objects: (
+                    0,
+                    0,
+                ),
+                compressed_objects: (
+                    0,
+                    0,
+                ),
             },
         ]
         ");
@@ -1007,6 +1048,6 @@ Done";
 
     #[test]
     fn test_initial_overall_progress_is_zero() {
-        assert_eq!(GitProgress::default().to_progress().overall, 0.0);
+        assert_eq!(GitProgress::default().overall(), 0.0);
     }
 }

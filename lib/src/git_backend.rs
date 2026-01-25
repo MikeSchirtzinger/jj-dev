@@ -1240,7 +1240,7 @@ impl Backend for GitBackend {
         };
         if commit.parents.is_empty() {
             commit.parents.push(self.root_commit_id.clone());
-        };
+        }
 
         let table = self.cached_extra_metadata_table()?;
         if let Some(extras) = table.get_value(id.as_bytes()) {
@@ -1323,6 +1323,18 @@ impl Backend for GitBackend {
                 CHANGE_ID_COMMIT_HEADER.into(),
                 contents.change_id.reverse_hex().into(),
             ));
+        }
+
+        if tree_ids.iter().any(|id| id == &self.empty_tree_id) {
+            let tree = gix::objs::Tree::empty();
+            let tree_id =
+                locked_repo
+                    .write_object(&tree)
+                    .map_err(|err| BackendError::WriteObject {
+                        object_type: "tree",
+                        source: Box::new(err),
+                    })?;
+            assert!(tree_id.is_empty_tree());
         }
 
         let extras = serialize_extras(&contents);
@@ -1476,7 +1488,7 @@ impl Backend for GitBackend {
                         Ok(Some(change)) => records.push(Ok(change)),
                         Err(err) => records.push(Err(err)),
                     }
-                    Ok(gix::object::tree::diff::Action::Continue)
+                    Ok(gix::object::tree::diff::Action::Continue(()))
                 },
             )
             .map_err(|err| BackendError::Other(err.into()))?;

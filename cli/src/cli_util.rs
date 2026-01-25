@@ -155,7 +155,6 @@ use crate::command_error::internal_error_with_message;
 use crate::command_error::print_error_sources;
 use crate::command_error::print_parse_diagnostics;
 use crate::command_error::user_error;
-use crate::command_error::user_error_with_hint;
 use crate::command_error::user_error_with_message;
 use crate::commit_templater::CommitTemplateLanguage;
 use crate::commit_templater::CommitTemplateLanguageExtension;
@@ -1116,10 +1115,7 @@ impl WorkspaceCommandHelper {
             } else {
                 "Don't use --at-op."
             };
-            Err(user_error_with_hint(
-                "This command must be able to update the working copy.",
-                hint,
-            ))
+            Err(user_error("This command must be able to update the working copy.").hinted(hint))
         }
     }
 
@@ -2568,8 +2564,7 @@ fn map_workspace_load_error(err: WorkspaceLoadError, user_wc_path: Option<&str>)
             let message = format!(r#"There is no jj repo in "{}""#, short_wc_path.display());
             let git_dir = wc_path.join(".git");
             if git_dir.is_dir() {
-                user_error_with_hint(
-                    message,
+                user_error(message).hinted(
                     "It looks like this is a git repo. You can create a jj repo backed by it by \
                      running this:
 jj git init",
@@ -2660,17 +2655,19 @@ fn handle_stale_working_copy(
                 Ok(None)
             }
         }
-        Ok(WorkingCopyFreshness::WorkingCopyStale) => Err(
-            SnapshotWorkingCopyError::StaleWorkingCopy(user_error_with_hint(
-                format!(
+        Ok(WorkingCopyFreshness::WorkingCopyStale) => {
+            Err(SnapshotWorkingCopyError::StaleWorkingCopy(
+                user_error(format!(
                     "The working copy is stale (not updated since operation {}).",
                     short_operation_hash(&old_op_id)
-                ),
-                "Run `jj workspace update-stale` to update it.
+                ))
+                .hinted(
+                    "Run `jj workspace update-stale` to update it.
 See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy \
-                 for more information.",
-            )),
-        ),
+                     for more information.",
+                ),
+            ))
+        }
         Ok(WorkingCopyFreshness::SiblingOperation) => {
             Err(SnapshotWorkingCopyError::StaleWorkingCopy(
                 internal_error(format!(
@@ -2686,14 +2683,15 @@ See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy \
                 )),
             ))
         }
-        Err(OpStoreError::ObjectNotFound { .. }) => Err(
-            SnapshotWorkingCopyError::StaleWorkingCopy(user_error_with_hint(
-                "Could not read working copy's operation.",
-                "Run `jj workspace update-stale` to recover.
+        Err(OpStoreError::ObjectNotFound { .. }) => {
+            Err(SnapshotWorkingCopyError::StaleWorkingCopy(
+                user_error("Could not read working copy's operation.").hinted(
+                    "Run `jj workspace update-stale` to recover.
 See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy \
-                 for more information.",
-            )),
-        ),
+                     for more information.",
+                ),
+            ))
+        }
         Err(e) => Err(snapshot_command_error(e)),
     }
 }
@@ -3704,7 +3702,8 @@ fn handle_shell_completion(
                 .chain(std::iter::repeat_n(OsString::new(), pad_len));
 
             // Expand aliases left of the completion index.
-            let mut expanded_args = expand_args(ui, app, padded_args.take(index + 1), config)?;
+            let mut expanded_args =
+                expand_args_for_completion(ui, app, padded_args.take(index + 1), config)?;
 
             // Adjust env var to compensate for shift of the completion point in the
             // expanded command line.
@@ -3729,7 +3728,7 @@ fn handle_shell_completion(
             expanded_args.extend(to_string_args(orig_args)?);
             expanded_args
         } else {
-            expand_args(ui, app, orig_args, config)?
+            expand_args_for_completion(ui, app, orig_args, config)?
         };
         args.extend(resolved_aliases.into_iter().map(OsString::from));
     }
@@ -3755,6 +3754,27 @@ pub fn expand_args(
     let string_args = to_string_args(args_os)?;
     let string_args = resolve_default_command(ui, config, app, string_args)?;
     resolve_aliases(ui, config, app, string_args)
+}
+
+fn expand_args_for_completion(
+    ui: &Ui,
+    app: &Command,
+    args_os: impl IntoIterator<Item = OsString>,
+    config: &StackedConfig,
+) -> Result<Vec<String>, CommandError> {
+    let string_args = to_string_args(args_os)?;
+
+    // If a subcommand has been given, including the potentially incomplete argument
+    // that is being completed, the default command is not resolved and the
+    // completion candidates for the subcommand are prioritized.
+    let mut string_args = resolve_default_command(ui, config, app, string_args)?;
+
+    // Resolution of subcommand aliases must not consider the argument that is being
+    // completed.
+    let cursor_arg = string_args.pop();
+    let mut resolved_args = resolve_aliases(ui, config, app, string_args)?;
+    resolved_args.extend(cursor_arg);
+    Ok(resolved_args)
 }
 
 fn to_string_args(
@@ -3996,8 +4016,7 @@ impl<'a> CliRunner<'a> {
         let cwd = env::current_dir()
             .and_then(dunce::canonicalize)
             .map_err(|_| {
-                user_error_with_hint(
-                    "Could not determine current directory",
+                user_error("Could not determine current directory").hinted(
                     "Did you update to a commit where the directory doesn't exist or can't be \
                      accessed?",
                 )

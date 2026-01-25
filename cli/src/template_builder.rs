@@ -2053,7 +2053,7 @@ pub fn build_expression<'a, L: TemplateLanguage<'a> + ?Sized>(
             let property = Literal(value.clone()).into_dyn_wrapped();
             Ok(Expression::unlabeled(property))
         }
-        ExpressionKind::StringPattern { .. } => Err(TemplateParseError::expression(
+        ExpressionKind::Pattern { .. } => Err(TemplateParseError::expression(
             "String patterns may not be used as expression values",
             node.span,
         )),
@@ -2265,6 +2265,7 @@ fn expect_expression_of_type<'a, L: TemplateLanguage<'a> + ?Sized, T>(
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
     use jj_lib::backend::MillisSinceEpoch;
     use jj_lib::config::StackedConfig;
 
@@ -2341,6 +2342,14 @@ mod tests {
                 .expect("Got unexpected successful template rendering");
 
             iter::successors(Some(&err as &dyn std::error::Error), |e| e.source()).join("\n")
+        }
+
+        fn parse_err_kind(&self, template: &str) -> TemplateParseErrorKind {
+            self.parse(template)
+                .err()
+                .expect("Got unexpected successful template rendering")
+                .kind()
+                .clone()
         }
 
         fn render_ok(&self, template: &str) -> String {
@@ -2731,6 +2740,46 @@ mod tests {
         });
         insta::assert_snapshot!(env.render_ok(r#"if(empty_email, true, false)"#), @"false");
         insta::assert_snapshot!(env.render_ok(r#"if(nonempty_email, true, false)"#), @"true");
+
+        // even boolean config values must be extracted
+        env.add_keyword("config_bool", || literal(ConfigValue::from(true)));
+        insta::assert_snapshot!(env.parse_err("if(config_bool, true, false)"), @"
+         --> 1:4
+          |
+        1 | if(config_bool, true, false)
+          |    ^---------^
+          |
+          = Expected expression of type `Boolean`, but actual type is `ConfigValue`
+        ");
+
+        // misc uncastable types
+        env.add_keyword("signature", || {
+            literal(new_signature("Test User", "test.user@example.com"))
+        });
+        env.add_keyword("size_hint", || literal((5, None)));
+        env.add_keyword("timestamp", || literal(new_timestamp(0, 0)));
+        env.add_keyword("timestamp_range", || {
+            literal(TimestampRange {
+                start: new_timestamp(0, 0),
+                end: new_timestamp(0, 0),
+            })
+        });
+        assert_matches!(
+            env.parse_err_kind("if(signature, true, false)"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("if(size_hint, true, false)"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("if(timestamp, true, false)"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("if(timestamp_range, true, false)"),
+            TemplateParseErrorKind::Expression(_)
+        );
     }
 
     #[test]
@@ -2805,6 +2854,80 @@ mod tests {
         insta::assert_snapshot!(env.render_ok(r#"some_i64_0 > some_i64_1"#), @"false");
         insta::assert_snapshot!(env.render_ok(r#"none_i64 < 0"#), @"true");
         insta::assert_snapshot!(env.render_ok(r#"1 > some_i64_0"#), @"true");
+
+        // invalid comparisons
+        assert_matches!(
+            env.parse_err_kind("42 >= true"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("none_i64 >= true"),
+            TemplateParseErrorKind::Expression(_)
+        );
+
+        // un-comparable types
+        env.add_keyword("str_list", || {
+            literal(vec!["foo".to_owned(), "bar".to_owned()])
+        });
+        env.add_keyword("cfg_val", || {
+            literal(ConfigValue::from_iter([("foo", "bar")]))
+        });
+        env.add_keyword("signature", || {
+            literal(new_signature("User", "user@example.com"))
+        });
+        env.add_keyword("email", || literal(Email("me@example.com".to_owned())));
+        env.add_keyword("size_hint", || literal((10, None)));
+        env.add_keyword("timestamp", || literal(new_timestamp(0, 0)));
+        env.add_keyword("timestamp_range", || {
+            literal(TimestampRange {
+                start: new_timestamp(0, 0),
+                end: new_timestamp(0, 0),
+            })
+        });
+        assert_matches!(
+            env.parse_err_kind("'a' >= 'a'"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("str_list >= str_list"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("true >= true"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("cfg_val >= cfg_val"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("signature >= signature"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("email >= email"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("size_hint >= size_hint"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("timestamp >= timestamp"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("timestamp_range >= timestamp_range"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("label('', '') >= label('', '')"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("str_list.map(|s| s) >= str_list.map(|s| s)"),
+            TemplateParseErrorKind::Expression(_)
+        );
     }
 
     #[test]
@@ -2854,6 +2977,67 @@ mod tests {
         insta::assert_snapshot!(env.render_ok(r#"true && bad_bool"#), @"<Error: Bad>");
         insta::assert_snapshot!(env.render_ok(r#"false || bad_bool"#), @"<Error: Bad>");
         insta::assert_snapshot!(env.render_ok(r#"true || bad_bool"#), @"true");
+
+        // Invalid comparisons
+        assert_matches!(
+            env.parse_err_kind("some_i64_0 == '0'"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("email1 == 42"),
+            TemplateParseErrorKind::Expression(_)
+        );
+
+        // Un-comparable types
+        env.add_keyword("str_list", || {
+            literal(vec!["foo".to_owned(), "bar".to_owned()])
+        });
+        env.add_keyword("cfg_val", || {
+            literal(ConfigValue::from_iter([("foo", "bar")]))
+        });
+        env.add_keyword("signature", || {
+            literal(new_signature("User", "user@example.com"))
+        });
+        env.add_keyword("size_hint", || literal((10, None)));
+        env.add_keyword("timestamp", || literal(new_timestamp(0, 0)));
+        env.add_keyword("timestamp_range", || {
+            literal(TimestampRange {
+                start: new_timestamp(0, 0),
+                end: new_timestamp(0, 0),
+            })
+        });
+        assert_matches!(
+            env.parse_err_kind("str_list == str_list"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("cfg_val == cfg_val"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("signature == signature"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("size_hint == size_hint"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("timestamp == timestamp"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("timestamp_range == timestamp_range"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("label('', '') == label('', '')"),
+            TemplateParseErrorKind::Expression(_)
+        );
+        assert_matches!(
+            env.parse_err_kind("str_list.map(|s| s) == str_list.map(|s| s)"),
+            TemplateParseErrorKind::Expression(_)
+        );
     }
 
     #[test]
@@ -3281,7 +3465,7 @@ mod tests {
     }
 
     #[test]
-    fn test_signature() {
+    fn test_signature_and_email_methods() {
         let mut env = TestTemplateEnv::new();
 
         env.add_keyword("author", || {
@@ -3290,6 +3474,9 @@ mod tests {
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"Test User <test.user@example.com>");
         insta::assert_snapshot!(env.render_ok(r#"author.name()"#), @"Test User");
         insta::assert_snapshot!(env.render_ok(r#"author.email()"#), @"test.user@example.com");
+        insta::assert_snapshot!(env.render_ok("author.email().local()"), @"test.user");
+        insta::assert_snapshot!(env.render_ok("author.email().domain()"), @"example.com");
+        insta::assert_snapshot!(env.render_ok("author.timestamp()"), @"1970-01-01 00:00:00.000 +00:00");
 
         env.add_keyword("author", || {
             literal(new_signature("Another Test User", "test.user@example.com"))
@@ -3304,22 +3491,30 @@ mod tests {
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"Test User <test.user@invalid@example.com>");
         insta::assert_snapshot!(env.render_ok(r#"author.name()"#), @"Test User");
         insta::assert_snapshot!(env.render_ok(r#"author.email()"#), @"test.user@invalid@example.com");
+        insta::assert_snapshot!(env.render_ok("author.email().local()"), @"test.user");
+        insta::assert_snapshot!(env.render_ok("author.email().domain()"), @"invalid@example.com");
 
         env.add_keyword("author", || {
             literal(new_signature("Test User", "test.user"))
         });
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"Test User <test.user>");
         insta::assert_snapshot!(env.render_ok(r#"author.email()"#), @"test.user");
+        insta::assert_snapshot!(env.render_ok("author.email().local()"), @"test.user");
+        insta::assert_snapshot!(env.render_ok("author.email().domain()"), @"");
 
         env.add_keyword("author", || {
             literal(new_signature("Test User", "test.user+tag@example.com"))
         });
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"Test User <test.user+tag@example.com>");
         insta::assert_snapshot!(env.render_ok(r#"author.email()"#), @"test.user+tag@example.com");
+        insta::assert_snapshot!(env.render_ok("author.email().local()"), @"test.user+tag");
+        insta::assert_snapshot!(env.render_ok("author.email().domain()"), @"example.com");
 
         env.add_keyword("author", || literal(new_signature("Test User", "x@y")));
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"Test User <x@y>");
         insta::assert_snapshot!(env.render_ok(r#"author.email()"#), @"x@y");
+        insta::assert_snapshot!(env.render_ok("author.email().local()"), @"x");
+        insta::assert_snapshot!(env.render_ok("author.email().domain()"), @"y");
 
         env.add_keyword("author", || {
             literal(new_signature("", "test.user@example.com"))
@@ -3332,6 +3527,8 @@ mod tests {
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"Test User");
         insta::assert_snapshot!(env.render_ok(r#"author.name()"#), @"Test User");
         insta::assert_snapshot!(env.render_ok(r#"author.email()"#), @"");
+        insta::assert_snapshot!(env.render_ok("author.email().local()"), @"");
+        insta::assert_snapshot!(env.render_ok("author.email().domain()"), @"");
 
         env.add_keyword("author", || literal(new_signature("", "")));
         insta::assert_snapshot!(env.render_ok(r#"author"#), @"");
@@ -3746,7 +3943,8 @@ mod tests {
             env.render_ok("json(timestamp_range)"),
             @r#"{"start":"1970-01-01T00:00:00Z","end":"1970-01-01T23:00:00-01:00"}"#);
 
-        insta::assert_snapshot!(env.parse_err(r#"json(string_list.map(|s| s))"#), @r"
+        // Template and ListTemplate are unserializable
+        insta::assert_snapshot!(env.parse_err(r#"json(string_list.map(|s| s))"#), @"
          --> 1:6
           |
         1 | json(string_list.map(|s| s))
@@ -3754,6 +3952,10 @@ mod tests {
           |
           = Expected expression of type `Serialize`, but actual type is `ListTemplate`
         ");
+        assert_matches!(
+            env.parse_err_kind("json(label('', ''))"),
+            TemplateParseErrorKind::Expression(_)
+        );
     }
 
     #[test]
@@ -3889,6 +4091,41 @@ mod tests {
           |
           = Function `join`: Unexpected keyword arguments
         "#);
+
+        // only size hints cannot be templated / joined
+        env.add_keyword("str_list", || {
+            literal(vec!["foo".to_owned(), "bar".to_owned()])
+        });
+        env.add_keyword("none_int", || literal(None));
+        env.add_keyword("some_int", || literal(Some(67)));
+        env.add_keyword("cfg_val", || {
+            literal(ConfigValue::from_iter([("foo", "bar")]))
+        });
+        env.add_keyword("email", || literal(Email("me@example.com".to_owned())));
+        env.add_keyword("signature", || {
+            literal(new_signature("User", "user@example.com"))
+        });
+        env.add_keyword("size_hint", || literal((10, None)));
+        env.add_keyword("timestamp", || literal(new_timestamp(0, 0)));
+        env.add_keyword("timestamp_range", || {
+            literal(TimestampRange {
+                start: new_timestamp(0, 0),
+                end: new_timestamp(0, 0),
+            })
+        });
+        insta::assert_snapshot!(
+            env.render_ok("join('|', str_list, 42, none_int, some_int)"),
+            @"foo bar|42||67");
+        insta::assert_snapshot!(
+            env.render_ok("join('|', cfg_val, email, signature)"),
+            @r#"{ foo = "bar" }|me@example.com|User <user@example.com>"#);
+        insta::assert_snapshot!(
+            env.render_ok("join('|', timestamp, timestamp_range, str_list.map(|x| x))"),
+            @"1970-01-01 00:00:00.000 +00:00|1970-01-01 00:00:00.000 +00:00 - 1970-01-01 00:00:00.000 +00:00|foo bar");
+        assert_matches!(
+            env.parse_err_kind("join('|', size_hint)"),
+            TemplateParseErrorKind::Expression(_)
+        );
     }
 
     #[test]
