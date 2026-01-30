@@ -1374,6 +1374,97 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
             Ok(out_property.into_dyn_wrapped())
         },
     );
+    // Hox metadata template keywords
+    map.insert(
+        "hox_priority",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property.map(|commit| {
+                commit
+                    .hox_priority()
+                    .map(|p| match p {
+                        0 => "critical".to_owned(),
+                        1 => "high".to_owned(),
+                        2 => "medium".to_owned(),
+                        3 => "low".to_owned(),
+                        n => n.to_string(),
+                    })
+                    .unwrap_or_default()
+            });
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_status",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property
+                .map(|commit| commit.hox_status().unwrap_or_default().to_owned());
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_agent",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property
+                .map(|commit| commit.hox_agent().unwrap_or_default().to_owned());
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_orchestrator",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property
+                .map(|commit| commit.hox_orchestrator().unwrap_or_default().to_owned());
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_msg_to",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property
+                .map(|commit| commit.hox_msg_to().unwrap_or_default().to_owned());
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_msg_type",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property
+                .map(|commit| commit.hox_msg_type().unwrap_or_default().to_owned());
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_loop_iteration",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property.map(|commit| {
+                commit
+                    .hox_loop_iteration()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            });
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
+    map.insert(
+        "hox_loop_max_iterations",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property.map(|commit| {
+                commit
+                    .hox_loop_max_iterations()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            });
+            Ok(out_property.into_dyn_wrapped())
+        },
+    );
     map
 }
 
