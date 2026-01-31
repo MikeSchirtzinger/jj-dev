@@ -174,21 +174,21 @@ pub struct Commit {
     // Hox metadata (all optional for backwards compatibility)
     // Skipped from default serde to maintain backwards compatibility with existing tools
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_priority: Option<i32>, // 0=Critical, 1=High, 2=Medium, 3=Low
+    pub priority: Option<i32>, // 0=Critical, 1=High, 2=Medium, 3=Low
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_status: Option<String>, // "open", "in_progress", "blocked", etc.
+    pub status: Option<String>, // "open", "in_progress", "blocked", etc.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_agent: Option<String>, // Agent identifier (e.g., "agent-42")
+    pub agent: Option<String>, // Agent identifier (e.g., "agent-42")
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_orchestrator: Option<String>, // Orchestrator identifier (e.g., "O-A-1")
+    pub orchestrator: Option<String>, // Orchestrator identifier (e.g., "O-A-1")
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_msg_to: Option<String>, // Message target (supports glob patterns)
+    pub msg_to: Option<String>, // Message target (supports glob patterns)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_msg_type: Option<String>, // "mutation", "info", "align_request"
+    pub msg_type: Option<String>, // "mutation", "info", "align_request"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_loop_iteration: Option<u32>, // Current loop iteration
+    pub iteration: Option<u32>, // Current loop iteration
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hox_loop_max_iterations: Option<u32>, // Maximum loop iterations allowed
+    pub max_iterations: Option<u32>, // Maximum loop iterations allowed
 }
 
 /// An individual copy event, from file A -> B.
@@ -426,14 +426,14 @@ pub fn make_root_commit(root_change_id: ChangeId, empty_tree_id: TreeId) -> Comm
         committer: signature,
         secure_sig: None,
         // Hox metadata - None for root commit
-        hox_priority: None,
-        hox_status: None,
-        hox_agent: None,
-        hox_orchestrator: None,
-        hox_msg_to: None,
-        hox_msg_type: None,
-        hox_loop_iteration: None,
-        hox_loop_max_iterations: None,
+        priority: None,
+        status: None,
+        agent: None,
+        orchestrator: None,
+        msg_to: None,
+        msg_type: None,
+        iteration: None,
+        max_iterations: None,
     }
 }
 

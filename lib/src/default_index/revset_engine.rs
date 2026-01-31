@@ -1360,13 +1360,13 @@ fn build_predicate_fn(
             })
         }
         // Hox metadata predicates
-        RevsetFilterPredicate::HoxPriority(expression) => {
+        RevsetFilterPredicate::Priority(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
                 // Map priority integer to string: 0=critical, 1=high, 2=medium, 3=low
-                let priority_str = match commit.hox_priority() {
+                let priority_str = match commit.priority() {
                     Some(0) => "critical",
                     Some(1) => "high",
                     Some(2) => "medium",
@@ -1376,46 +1376,46 @@ fn build_predicate_fn(
                 Ok(matcher.is_match(priority_str))
             })
         }
-        RevsetFilterPredicate::HoxStatus(expression) => {
+        RevsetFilterPredicate::Status(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
-                Ok(commit.hox_status().is_some_and(|s| matcher.is_match(s)))
+                Ok(commit.status().is_some_and(|s| matcher.is_match(s)))
             })
         }
-        RevsetFilterPredicate::HoxAgent(expression) => {
+        RevsetFilterPredicate::Agent(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
-                Ok(commit.hox_agent().is_some_and(|s| matcher.is_match(s)))
+                Ok(commit.agent().is_some_and(|s| matcher.is_match(s)))
             })
         }
-        RevsetFilterPredicate::HoxOrchestrator(expression) => {
+        RevsetFilterPredicate::Orchestrator(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
                 Ok(commit
-                    .hox_orchestrator()
+                    .orchestrator()
                     .is_some_and(|s| matcher.is_match(s)))
             })
         }
-        RevsetFilterPredicate::HoxMsgTo(expression) => {
+        RevsetFilterPredicate::MsgTo(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
-                Ok(commit.hox_msg_to().is_some_and(|s| matcher.is_match(s)))
+                Ok(commit.msg_to().is_some_and(|s| matcher.is_match(s)))
             })
         }
-        RevsetFilterPredicate::HoxMsgType(expression) => {
+        RevsetFilterPredicate::MsgType(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
                 let entry = index.commits().entry_by_pos(pos);
                 let commit = store.get_commit(&entry.commit_id())?;
-                Ok(commit.hox_msg_type().is_some_and(|s| matcher.is_match(s)))
+                Ok(commit.msg_type().is_some_and(|s| matcher.is_match(s)))
             })
         }
     }

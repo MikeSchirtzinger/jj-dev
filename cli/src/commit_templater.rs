@@ -1376,12 +1376,12 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
     );
     // Hox metadata template keywords
     map.insert(
-        "hox_priority",
+        "priority",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property.map(|commit| {
                 commit
-                    .hox_priority()
+                    .priority()
                     .map(|p| match p {
                         0 => "critical".to_owned(),
                         1 => "high".to_owned(),
@@ -1395,57 +1395,57 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         },
     );
     map.insert(
-        "hox_status",
+        "status",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property
-                .map(|commit| commit.hox_status().unwrap_or_default().to_owned());
+                .map(|commit| commit.status().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
     map.insert(
-        "hox_agent",
+        "agent",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property
-                .map(|commit| commit.hox_agent().unwrap_or_default().to_owned());
+                .map(|commit| commit.agent().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
     map.insert(
-        "hox_orchestrator",
+        "orchestrator",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property
-                .map(|commit| commit.hox_orchestrator().unwrap_or_default().to_owned());
+                .map(|commit| commit.orchestrator().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
     map.insert(
-        "hox_msg_to",
+        "msg_to",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property
-                .map(|commit| commit.hox_msg_to().unwrap_or_default().to_owned());
+                .map(|commit| commit.msg_to().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
     map.insert(
-        "hox_msg_type",
+        "msg_type",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property
-                .map(|commit| commit.hox_msg_type().unwrap_or_default().to_owned());
+                .map(|commit| commit.msg_type().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
     map.insert(
-        "hox_loop_iteration",
+        "iteration",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property.map(|commit| {
                 commit
-                    .hox_loop_iteration()
+                    .iteration()
                     .map(|n| n.to_string())
                     .unwrap_or_default()
             });
@@ -1453,12 +1453,12 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         },
     );
     map.insert(
-        "hox_loop_max_iterations",
+        "max_iterations",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let out_property = self_property.map(|commit| {
                 commit
-                    .hox_loop_max_iterations()
+                    .max_iterations()
                     .map(|n| n.to_string())
                     .unwrap_or_default()
             });

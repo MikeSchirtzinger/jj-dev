@@ -201,17 +201,17 @@ pub enum RevsetFilterPredicate {
     // Hox metadata predicates
     /// Commits with Hox priority matching the pattern (critical, high, medium,
     /// low)
-    HoxPriority(StringExpression),
+    Priority(StringExpression),
     /// Commits with Hox status matching the pattern
-    HoxStatus(StringExpression),
+    Status(StringExpression),
     /// Commits with Hox agent identifier matching the pattern
-    HoxAgent(StringExpression),
+    Agent(StringExpression),
     /// Commits with Hox orchestrator identifier matching the pattern
-    HoxOrchestrator(StringExpression),
+    Orchestrator(StringExpression),
     /// Commits with Hox message target matching the pattern
-    HoxMsgTo(StringExpression),
+    MsgTo(StringExpression),
     /// Commits with Hox message type matching the pattern
-    HoxMsgType(StringExpression),
+    MsgType(StringExpression),
 }
 
 mod private {
@@ -1153,37 +1153,37 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
     map.insert("priority", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
         let expr = expect_string_expression(diagnostics, arg, context)?;
-        let predicate = RevsetFilterPredicate::HoxPriority(expr);
+        let predicate = RevsetFilterPredicate::Priority(expr);
         Ok(RevsetExpression::filter(predicate))
     });
     map.insert("status", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
         let expr = expect_string_expression(diagnostics, arg, context)?;
-        let predicate = RevsetFilterPredicate::HoxStatus(expr);
+        let predicate = RevsetFilterPredicate::Status(expr);
         Ok(RevsetExpression::filter(predicate))
     });
     map.insert("agent", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
         let expr = expect_string_expression(diagnostics, arg, context)?;
-        let predicate = RevsetFilterPredicate::HoxAgent(expr);
+        let predicate = RevsetFilterPredicate::Agent(expr);
         Ok(RevsetExpression::filter(predicate))
     });
     map.insert("orchestrator", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
         let expr = expect_string_expression(diagnostics, arg, context)?;
-        let predicate = RevsetFilterPredicate::HoxOrchestrator(expr);
+        let predicate = RevsetFilterPredicate::Orchestrator(expr);
         Ok(RevsetExpression::filter(predicate))
     });
     map.insert("msg_to", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
         let expr = expect_string_expression(diagnostics, arg, context)?;
-        let predicate = RevsetFilterPredicate::HoxMsgTo(expr);
+        let predicate = RevsetFilterPredicate::MsgTo(expr);
         Ok(RevsetExpression::filter(predicate))
     });
     map.insert("msg_type", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
         let expr = expect_string_expression(diagnostics, arg, context)?;
-        let predicate = RevsetFilterPredicate::HoxMsgType(expr);
+        let predicate = RevsetFilterPredicate::MsgType(expr);
         Ok(RevsetExpression::filter(predicate))
     });
     map

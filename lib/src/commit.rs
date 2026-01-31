@@ -212,43 +212,43 @@ impl Commit {
     // Hox metadata accessors
 
     /// Returns the Hox priority level (0=Critical, 1=High, 2=Medium, 3=Low)
-    pub fn hox_priority(&self) -> Option<i32> {
-        self.data.hox_priority
+    pub fn priority(&self) -> Option<i32> {
+        self.data.priority
     }
 
     /// Returns the Hox status string (e.g., "open", "in_progress", "blocked")
-    pub fn hox_status(&self) -> Option<&str> {
-        self.data.hox_status.as_deref()
+    pub fn status(&self) -> Option<&str> {
+        self.data.status.as_deref()
     }
 
     /// Returns the Hox agent identifier (e.g., "agent-42")
-    pub fn hox_agent(&self) -> Option<&str> {
-        self.data.hox_agent.as_deref()
+    pub fn agent(&self) -> Option<&str> {
+        self.data.agent.as_deref()
     }
 
     /// Returns the Hox orchestrator identifier (e.g., "O-A-1")
-    pub fn hox_orchestrator(&self) -> Option<&str> {
-        self.data.hox_orchestrator.as_deref()
+    pub fn orchestrator(&self) -> Option<&str> {
+        self.data.orchestrator.as_deref()
     }
 
     /// Returns the Hox message target (supports glob patterns)
-    pub fn hox_msg_to(&self) -> Option<&str> {
-        self.data.hox_msg_to.as_deref()
+    pub fn msg_to(&self) -> Option<&str> {
+        self.data.msg_to.as_deref()
     }
 
     /// Returns the Hox message type (e.g., "mutation", "info", "align_request")
-    pub fn hox_msg_type(&self) -> Option<&str> {
-        self.data.hox_msg_type.as_deref()
+    pub fn msg_type(&self) -> Option<&str> {
+        self.data.msg_type.as_deref()
     }
 
     /// Returns the Hox loop iteration number
-    pub fn hox_loop_iteration(&self) -> Option<u32> {
-        self.data.hox_loop_iteration
+    pub fn iteration(&self) -> Option<u32> {
+        self.data.iteration
     }
 
     /// Returns the maximum Hox loop iterations allowed
-    pub fn hox_loop_max_iterations(&self) -> Option<u32> {
-        self.data.hox_loop_max_iterations
+    pub fn max_iterations(&self) -> Option<u32> {
+        self.data.max_iterations
     }
 
     /// A string describing the commit to be used in conflict markers. If a

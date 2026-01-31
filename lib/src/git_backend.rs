@@ -649,14 +649,14 @@ fn commit_from_git_without_root_parent(
         committer,
         secure_sig,
         // Hox metadata - None for git commits (will be set later if extra metadata exists)
-        hox_priority: None,
-        hox_status: None,
-        hox_agent: None,
-        hox_orchestrator: None,
-        hox_msg_to: None,
-        hox_msg_type: None,
-        hox_loop_iteration: None,
-        hox_loop_max_iterations: None,
+        priority: None,
+        status: None,
+        agent: None,
+        orchestrator: None,
+        msg_to: None,
+        msg_type: None,
+        iteration: None,
+        max_iterations: None,
     })
 }
 
@@ -756,14 +756,14 @@ fn serialize_extras(commit: &Commit) -> Vec<u8> {
     }
 
     // Hox metadata
-    proto.hox_priority = commit.hox_priority;
-    proto.hox_status = commit.hox_status.clone();
-    proto.hox_agent = commit.hox_agent.clone();
-    proto.hox_orchestrator = commit.hox_orchestrator.clone();
-    proto.hox_msg_to = commit.hox_msg_to.clone();
-    proto.hox_msg_type = commit.hox_msg_type.clone();
-    proto.hox_loop_iteration = commit.hox_loop_iteration;
-    proto.hox_loop_max_iterations = commit.hox_loop_max_iterations;
+    proto.priority = commit.priority;
+    proto.status = commit.status.clone();
+    proto.agent = commit.agent.clone();
+    proto.orchestrator = commit.orchestrator.clone();
+    proto.msg_to = commit.msg_to.clone();
+    proto.msg_type = commit.msg_type.clone();
+    proto.iteration = commit.iteration;
+    proto.max_iterations = commit.max_iterations;
 
     proto.encode_to_vec()
 }
@@ -789,14 +789,14 @@ fn deserialize_extras(commit: &mut Commit, bytes: &[u8]) {
     }
 
     // Hox metadata
-    commit.hox_priority = proto.hox_priority;
-    commit.hox_status = proto.hox_status;
-    commit.hox_agent = proto.hox_agent;
-    commit.hox_orchestrator = proto.hox_orchestrator;
-    commit.hox_msg_to = proto.hox_msg_to;
-    commit.hox_msg_type = proto.hox_msg_type;
-    commit.hox_loop_iteration = proto.hox_loop_iteration;
-    commit.hox_loop_max_iterations = proto.hox_loop_max_iterations;
+    commit.priority = proto.priority;
+    commit.status = proto.status;
+    commit.agent = proto.agent;
+    commit.orchestrator = proto.orchestrator;
+    commit.msg_to = proto.msg_to;
+    commit.msg_type = proto.msg_type;
+    commit.iteration = proto.iteration;
+    commit.max_iterations = proto.max_iterations;
 }
 
 /// Returns `RefEdit` that will create a ref in `refs/jj/keep` if not exist.
@@ -1987,14 +1987,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         };
 
         let (initial_commit_id, _init_commit) =
@@ -2087,14 +2087,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2182,14 +2182,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2291,14 +2291,14 @@ mod tests {
             author: signature.clone(),
             committer: signature,
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         };
         let commit_id = backend.write_commit(commit, None).block_on().unwrap().0;
         let git_refs = git_repo.references().unwrap();
@@ -2380,14 +2380,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2431,14 +2431,14 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         };
 
         let mut signer = |data: &_| {
