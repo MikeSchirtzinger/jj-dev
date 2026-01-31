@@ -320,14 +320,14 @@ mod tests {
             author,
             committer,
             secure_sig: None,
-            hox_priority: None,
-            hox_status: None,
-            hox_agent: None,
-            hox_orchestrator: None,
-            hox_msg_to: None,
-            hox_msg_type: None,
-            hox_loop_iteration: None,
-            hox_loop_max_iterations: None,
+            priority: None,
+            status: None,
+            agent: None,
+            orchestrator: None,
+            msg_to: None,
+            msg_type: None,
+            iteration: None,
+            max_iterations: None,
         })
     }
 

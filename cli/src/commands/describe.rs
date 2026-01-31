@@ -234,28 +234,28 @@ pub(crate) async fn cmd_describe(
                 commit_builder.set_description(description);
             }
             if let Some(priority) = hox_priority {
-                commit_builder.set_hox_priority(Some(priority));
+                commit_builder.set_priority(Some(priority));
             }
             if let Some(status) = &hox_status {
-                commit_builder.set_hox_status(Some(status.clone()));
+                commit_builder.set_status(Some(status.clone()));
             }
             if let Some(agent) = &args.set_agent {
-                commit_builder.set_hox_agent(Some(agent.clone()));
+                commit_builder.set_agent(Some(agent.clone()));
             }
             if let Some(orchestrator) = &args.set_orchestrator {
-                commit_builder.set_hox_orchestrator(Some(orchestrator.clone()));
+                commit_builder.set_orchestrator(Some(orchestrator.clone()));
             }
             if let Some(msg_to) = &args.set_msg_to {
-                commit_builder.set_hox_msg_to(Some(msg_to.clone()));
+                commit_builder.set_msg_to(Some(msg_to.clone()));
             }
             if let Some(msg_type) = &hox_msg_type {
-                commit_builder.set_hox_msg_type(Some(msg_type.clone()));
+                commit_builder.set_msg_type(Some(msg_type.clone()));
             }
             if let Some(iteration) = args.set_loop_iteration {
-                commit_builder.set_hox_loop_iteration(Some(iteration));
+                commit_builder.set_iteration(Some(iteration));
             }
             if let Some(max_iterations) = args.set_loop_max_iterations {
-                commit_builder.set_hox_loop_max_iterations(Some(max_iterations));
+                commit_builder.set_max_iterations(Some(max_iterations));
             }
             commit_builder
         })
@@ -357,14 +357,14 @@ pub(crate) async fn cmd_describe(
                 if let Some(temp_builder) = commit_builders.get(&old_commit_id) {
                     commit_builder
                         .set_description(temp_builder.description())
-                        .set_hox_priority(temp_builder.hox_priority())
-                        .set_hox_status(temp_builder.hox_status().map(str::to_owned))
-                        .set_hox_agent(temp_builder.hox_agent().map(str::to_owned))
-                        .set_hox_orchestrator(temp_builder.hox_orchestrator().map(str::to_owned))
-                        .set_hox_msg_to(temp_builder.hox_msg_to().map(str::to_owned))
-                        .set_hox_msg_type(temp_builder.hox_msg_type().map(str::to_owned))
-                        .set_hox_loop_iteration(temp_builder.hox_loop_iteration())
-                        .set_hox_loop_max_iterations(temp_builder.hox_loop_max_iterations())
+                        .set_priority(temp_builder.priority())
+                        .set_status(temp_builder.status().map(str::to_owned))
+                        .set_agent(temp_builder.agent().map(str::to_owned))
+                        .set_orchestrator(temp_builder.orchestrator().map(str::to_owned))
+                        .set_msg_to(temp_builder.msg_to().map(str::to_owned))
+                        .set_msg_type(temp_builder.msg_type().map(str::to_owned))
+                        .set_iteration(temp_builder.iteration())
+                        .set_max_iterations(temp_builder.max_iterations())
                         .write()
                         .await?;
                     num_described += 1;
