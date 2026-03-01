@@ -68,6 +68,7 @@ use crate::op_heads_store;
 use crate::op_heads_store::OpHeadResolutionError;
 use crate::op_heads_store::OpHeadsStore;
 use crate::op_heads_store::OpHeadsStoreError;
+use crate::op_heads_store::read_op_heads_non_mutating;
 use crate::op_store;
 use crate::op_store::OpStore;
 use crate::op_store::OpStoreError;
@@ -465,7 +466,11 @@ impl Default for StoreFactories {
         );
         factories.add_op_heads_store(
             ForkedOpHeadsStore::name(),
-            Box::new(|_settings, store_path| Ok(Box::new(ForkedOpHeadsStore::load(store_path)))),
+            Box::new(|_settings, store_path| {
+                ForkedOpHeadsStore::load(store_path)
+                    .map(|s| Box::new(s) as Box<dyn OpHeadsStore>)
+                    .map_err(|e| BackendLoadError(e.into()))
+            }),
         );
 
         // Index
@@ -766,6 +771,42 @@ impl RepoLoader {
         )?;
         let view = op.view()?;
         self.finish_load(op, view)
+    }
+
+    /// Load the repo at the current head without acquiring write locks or
+    /// resolving divergent op heads via merge operations.
+    ///
+    /// When multiple op heads exist (e.g. from N concurrent agents each writing
+    /// their own operations), this method picks the one with the latest end
+    /// timestamp rather than merging them. This is guaranteed non-mutating:
+    /// no merge operation is written, no lock is acquired.
+    ///
+    /// Use this for read-only commands (`jj log`, `jj diff`, `jj status`) in
+    /// parallel agent environments where divergent heads are expected and should
+    /// only be resolved by the orchestrator at merge time.
+    pub fn load_at_head_readonly(&self) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
+        let op = read_op_heads_non_mutating::<RepoLoaderError>(
+            self.op_heads_store.as_ref(),
+            &self.op_store,
+        )?;
+        let view = op.view()?;
+        self.finish_load(op, view)
+    }
+
+    /// Returns a clone of this loader that uses a [`ReadOnlyOpHeadsStore`]
+    /// wrapper, ensuring all repo operations through this loader cannot
+    /// advance op heads or trigger merge resolution.
+    pub fn as_readonly(&self) -> Self {
+        use crate::op_heads_store::ReadOnlyOpHeadsStore;
+        let readonly_store = Arc::new(ReadOnlyOpHeadsStore::new(self.op_heads_store.clone()));
+        Self {
+            settings: self.settings.clone(),
+            store: self.store.clone(),
+            op_store: self.op_store.clone(),
+            op_heads_store: readonly_store,
+            index_store: self.index_store.clone(),
+            submodule_store: self.submodule_store.clone(),
+        }
     }
 
     #[instrument(skip(self))]

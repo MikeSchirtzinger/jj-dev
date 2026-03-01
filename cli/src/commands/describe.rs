@@ -156,13 +156,24 @@ pub(crate) struct DescribeArgs {
     #[arg(long, value_name = "MAX_ITERATIONS")]
     set_loop_max_iterations: Option<u32>,
 
-    // TODO(W7): Add --metadata-only flag for hox metadata updates.
-    // When only hox fields (priority, status, agent, orchestrator, etc.) are being
-    // changed, bypass the full commit rewrite path (rewrite_commit + transform_descendants).
-    // The git backend's extra_metadata_table is already keyed by commit id and can be
-    // updated in-place via save_extra_metadata_table() without creating a new git object.
-    // This eliminates ~80% of oplog staleness in orchestration scenarios.
-    // See: lib/src/git_backend.rs save_extra_metadata_table()
+    /// Write metadata to op_store but do not advance op_heads.
+    ///
+    /// When set, the operation is written to the operation store but is NOT
+    /// published to op_heads. Other workspaces will not see this operation
+    /// when loading at head, eliminating cross-workspace oplog staleness for
+    /// parallel agent setups.
+    ///
+    /// Only valid when combined with Hox metadata flags (--set-status,
+    /// --set-priority, etc.). Cannot be combined with --editor, --stdin,
+    /// --message, --reset-author, or --author.
+    ///
+    /// The operation ID is printed to stdout so the orchestrator can track and
+    /// merge it later using `tx.merge_operation(op)`.
+    #[arg(
+        long,
+        conflicts_with_all = ["editor", "edit", "stdin", "reset_author", "author"]
+    )]
+    metadata_only: bool,
 }
 
 #[instrument(skip_all)]
@@ -351,7 +362,11 @@ pub(crate) fn cmd_describe(
         })
         .collect_vec();
 
-    let use_editor = args.editor || args.edit || (shared_description.is_none() && !args.no_edit);
+    // --metadata-only suppresses the editor: it only applies Hox metadata without
+    // touching the description. If no editor/message flags are set we don't want
+    // to open an editor just to set status/priority/agent fields.
+    let use_editor = !args.metadata_only
+        && (args.editor || args.edit || (shared_description.is_none() && !args.no_edit));
 
     if let Some(trailer_template) = parse_trailers_template(ui, &tx)? {
         for commit_builder in &mut commit_builders {
@@ -477,6 +492,25 @@ pub(crate) fn cmd_describe(
     if num_reparented > 0 {
         writeln!(ui.status(), "Rebased {num_reparented} descendant commits")?;
     }
-    tx.finish(ui, tx_description)?;
+
+    if args.metadata_only {
+        // Validate: --metadata-only requires at least one Hox metadata flag.
+        if !has_hox_changes {
+            return Err(user_error(
+                "--metadata-only requires at least one Hox metadata flag \
+                 (--set-status, --set-priority, --set-agent, etc.)",
+            ));
+        }
+        // Write operation to op_store but do NOT update op_heads.
+        // Other workspaces will not see this as a new head, eliminating
+        // cascading oplog staleness in parallel agent environments.
+        let unpublished = tx.into_inner().write(tx_description)?;
+        let op_id = unpublished.operation().id().hex();
+        // Leave unpublished: op is durable in op_store but not in op_heads.
+        unpublished.leave_unpublished();
+        writeln!(ui.status(), "Metadata-only op: {op_id}")?;
+    } else {
+        tx.finish(ui, tx_description)?;
+    }
     Ok(())
 }
