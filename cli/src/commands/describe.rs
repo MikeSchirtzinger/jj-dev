@@ -113,6 +113,16 @@ pub(crate) struct DescribeArgs {
     /// Set max loop iterations
     #[arg(long, value_name = "MAX_ITERATIONS")]
     set_loop_max_iterations: Option<u32>,
+
+    /// Write metadata to the operation store without advancing op heads.
+    ///
+    /// This is only valid with Hox metadata flags. The unpublished operation ID
+    /// is printed so an orchestrator can explicitly integrate it later.
+    #[arg(
+        long,
+        conflicts_with_all = ["editor", "stdin", "message_paragraphs"]
+    )]
+    metadata_only: bool,
 }
 
 #[instrument(skip_all)]
@@ -261,7 +271,7 @@ pub(crate) async fn cmd_describe(
         })
         .collect_vec();
 
-    let use_editor = args.editor || shared_description.is_none();
+    let use_editor = !args.metadata_only && (args.editor || shared_description.is_none());
 
     if let Some(trailer_template) = parse_trailers_template(ui, &tx)? {
         for commit_builder in &mut commit_builders {
@@ -382,6 +392,19 @@ pub(crate) async fn cmd_describe(
     if num_reparented > 0 {
         writeln!(ui.status(), "Rebased {num_reparented} descendant commits")?;
     }
-    tx.finish(ui, tx_description).await?;
+    if args.metadata_only {
+        if !has_hox_changes {
+            return Err(user_error(
+                "--metadata-only requires at least one Hox metadata flag \
+                 (--set-status, --set-priority, --set-agent, etc.)",
+            ));
+        }
+        let unpublished = tx.into_inner().write(tx_description).await?;
+        let op_id = unpublished.operation().id().hex();
+        unpublished.leave_unpublished();
+        writeln!(ui.status(), "Metadata-only op: {op_id}")?;
+    } else {
+        tx.finish(ui, tx_description).await?;
+    }
     Ok(())
 }
