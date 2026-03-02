@@ -237,6 +237,7 @@ impl ReadOnlyOpHeadsStore {
 
 #[async_trait]
 impl OpHeadsStore for ReadOnlyOpHeadsStore {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
         "read_only_op_heads_store"
     }

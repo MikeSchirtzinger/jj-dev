@@ -49,6 +49,7 @@ use crate::default_index::DefaultMutableIndex;
 use crate::default_submodule_store::DefaultSubmoduleStore;
 use crate::file_util::IoResultExt as _;
 use crate::file_util::PathError;
+use crate::forked_op_heads_store::ForkedOpHeadsStore;
 use crate::index::ChangeIdIndex;
 use crate::index::Index;
 use crate::index::IndexError;
@@ -104,7 +105,6 @@ use crate::settings::UserSettings;
 use crate::signing::SignInitError;
 use crate::signing::Signer;
 use crate::simple_backend::SimpleBackend;
-use crate::forked_op_heads_store::ForkedOpHeadsStore;
 use crate::simple_op_heads_store::SimpleOpHeadsStore;
 use crate::simple_op_store::SimpleOpStore;
 use crate::store::Store;
@@ -782,8 +782,8 @@ impl RepoLoader {
     /// no merge operation is written, no lock is acquired.
     ///
     /// Use this for read-only commands (`jj log`, `jj diff`, `jj status`) in
-    /// parallel agent environments where divergent heads are expected and should
-    /// only be resolved by the orchestrator at merge time.
+    /// parallel agent environments where divergent heads are expected and
+    /// should only be resolved by the orchestrator at merge time.
     pub fn load_at_head_readonly(&self) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
         let op = read_op_heads_non_mutating::<RepoLoaderError>(
             self.op_heads_store.as_ref(),
@@ -793,9 +793,10 @@ impl RepoLoader {
         self.finish_load(op, view)
     }
 
-    /// Returns a clone of this loader that uses a [`ReadOnlyOpHeadsStore`]
-    /// wrapper, ensuring all repo operations through this loader cannot
-    /// advance op heads or trigger merge resolution.
+    /// Returns a clone of this loader that uses a
+    /// [`crate::op_heads_store::ReadOnlyOpHeadsStore`] wrapper, ensuring all
+    /// repo operations through this loader cannot advance op heads or trigger
+    /// merge resolution.
     pub fn as_readonly(&self) -> Self {
         use crate::op_heads_store::ReadOnlyOpHeadsStore;
         let readonly_store = Arc::new(ReadOnlyOpHeadsStore::new(self.op_heads_store.clone()));
