@@ -103,6 +103,7 @@ use crate::settings::UserSettings;
 use crate::signing::SignInitError;
 use crate::signing::Signer;
 use crate::simple_backend::SimpleBackend;
+use crate::forked_op_heads_store::ForkedOpHeadsStore;
 use crate::simple_op_heads_store::SimpleOpHeadsStore;
 use crate::simple_op_store::SimpleOpStore;
 use crate::store::Store;
@@ -461,6 +462,10 @@ impl Default for StoreFactories {
         factories.add_op_heads_store(
             SimpleOpHeadsStore::name(),
             Box::new(|_settings, store_path| Ok(Box::new(SimpleOpHeadsStore::load(store_path)))),
+        );
+        factories.add_op_heads_store(
+            ForkedOpHeadsStore::name(),
+            Box::new(|_settings, store_path| Ok(Box::new(ForkedOpHeadsStore::load(store_path)))),
         );
 
         // Index
