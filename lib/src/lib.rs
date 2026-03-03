@@ -101,6 +101,9 @@ pub mod tree_merge;
 // "examples/simple-backend/").
 pub mod simple_backend;
 pub mod simple_op_heads_store;
+pub mod forked_op_heads_store;
+#[cfg(feature = "brevity")]
+pub mod brevity;
 pub mod simple_op_store;
 pub mod ssh_signing;
 pub mod stacked_table;

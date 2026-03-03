@@ -41,3 +41,6 @@ mod test_signing;
 mod test_ssh_signing;
 mod test_view;
 mod test_workspace;
+mod test_forked_op_heads;
+#[cfg(feature = "brevity")]
+mod test_brevity;

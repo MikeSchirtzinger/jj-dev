@@ -99,6 +99,7 @@ default = ["git"]
 git = ["dep:gix"]
 watchman = ["dep:watchman_client", "dep:tokio"]
 testing = ["git"]
+brevity = []
 
 [lints]
 workspace = true
