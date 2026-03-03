@@ -155,6 +155,14 @@ pub(crate) struct DescribeArgs {
     /// Set max loop iterations
     #[arg(long, value_name = "MAX_ITERATIONS")]
     set_loop_max_iterations: Option<u32>,
+
+    // TODO(W7): Add --metadata-only flag for hox metadata updates.
+    // When only hox fields (priority, status, agent, orchestrator, etc.) are being
+    // changed, bypass the full commit rewrite path (rewrite_commit + transform_descendants).
+    // The git backend's extra_metadata_table is already keyed by commit id and can be
+    // updated in-place via save_extra_metadata_table() without creating a new git object.
+    // This eliminates ~80% of oplog staleness in orchestration scenarios.
+    // See: lib/src/git_backend.rs save_extra_metadata_table()
 }
 
 #[instrument(skip_all)]
