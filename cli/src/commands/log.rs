@@ -134,11 +134,11 @@ pub(crate) fn cmd_log(
     args: &LogArgs,
 ) -> Result<(), CommandError> {
     // TODO(W8): Add --read-only flag to skip working-copy snapshot.
-    // When the orchestrator polls `jj log` for metadata, it doesn't need the working
-    // copy to be snapshotted. Use workspace_helper_no_snapshot() instead of
-    // workspace_helper() when --read-only is set. This prevents oplog writes from
-    // polling queries, eliminating contention with agent workspace writes.
-    // See: cli/src/cli_util.rs workspace_helper_no_snapshot()
+    // When the orchestrator polls `jj log` for metadata, it doesn't need the
+    // working copy to be snapshotted. Use workspace_helper_no_snapshot()
+    // instead of workspace_helper() when --read-only is set. This prevents
+    // oplog writes from polling queries, eliminating contention with agent
+    // workspace writes. See: cli/src/cli_util.rs workspace_helper_no_snapshot()
     let workspace_command = command.workspace_helper(ui)?;
     let settings = workspace_command.settings();
 

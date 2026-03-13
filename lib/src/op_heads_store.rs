@@ -165,3 +165,100 @@ where
         .block_on()?;
     Ok(new_op)
 }
+
+/// Read op heads without acquiring any locks or triggering merge operations.
+///
+/// When multiple op heads exist (divergent state from concurrent agents),
+/// this returns the one with the latest end timestamp rather than merging.
+/// Guaranteed non-mutating: never writes to the store.
+///
+/// Use this for read-only operations (jj log, jj diff, jj status) in
+/// parallel agent environments where divergent heads are expected and should
+/// not be automatically resolved.
+pub fn read_op_heads_non_mutating<E>(
+    op_heads_store: &dyn OpHeadsStore,
+    op_store: &Arc<dyn OpStore>,
+) -> Result<Operation, E>
+where
+    E: From<OpHeadResolutionError> + From<OpHeadsStoreError> + From<OpStoreError>,
+{
+    let op_head_ids = op_heads_store.get_op_heads().block_on()?;
+
+    if op_head_ids.is_empty() {
+        return Err(OpHeadResolutionError::NoHeads.into());
+    }
+
+    if op_head_ids.len() == 1 {
+        let op_id = op_head_ids.into_iter().next().unwrap();
+        let data = op_store.read_operation(&op_id).block_on()?;
+        return Ok(Operation::new(op_store.clone(), op_id, data));
+    }
+
+    // Multiple heads: pick the one with the latest end timestamp.
+    // Do NOT merge, lock, or write — just observe.
+    let mut best_op: Option<Operation> = None;
+    for op_id in &op_head_ids {
+        let data = op_store.read_operation(op_id).block_on()?;
+        let op = Operation::new(op_store.clone(), op_id.clone(), data);
+        let is_newer = best_op
+            .as_ref()
+            .map(|b| op.metadata().time.end.timestamp > b.metadata().time.end.timestamp)
+            .unwrap_or(true);
+        if is_newer {
+            best_op = Some(op);
+        }
+    }
+    Ok(best_op.unwrap())
+}
+
+/// A no-op lock used by read-only store implementations.
+struct NoOpLock;
+impl OpHeadsStoreLock for NoOpLock {}
+
+/// An [`OpHeadsStore`] wrapper that prevents any writes.
+///
+/// All read operations are delegated to the inner store. Any attempt to call
+/// `update_op_heads` returns an error. The `lock` method returns a no-op lock
+/// so callers that acquire a lock before reading still work correctly.
+///
+/// Use this to guarantee that loading a repo for read-only purposes (e.g.
+/// `jj log`, `jj diff`) cannot trigger merge operations or advance op heads.
+#[derive(Debug)]
+pub struct ReadOnlyOpHeadsStore {
+    inner: Arc<dyn OpHeadsStore>,
+}
+
+impl ReadOnlyOpHeadsStore {
+    /// Wrap `inner` with read-only enforcement.
+    pub fn new(inner: Arc<dyn OpHeadsStore>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl OpHeadsStore for ReadOnlyOpHeadsStore {
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn name(&self) -> &str {
+        "read_only_op_heads_store"
+    }
+
+    async fn update_op_heads(
+        &self,
+        _old_ids: &[OperationId],
+        new_id: &OperationId,
+    ) -> Result<(), OpHeadsStoreError> {
+        Err(OpHeadsStoreError::Write {
+            new_op_id: new_id.clone(),
+            source: "attempted write on read-only op heads store".into(),
+        })
+    }
+
+    async fn get_op_heads(&self) -> Result<Vec<OperationId>, OpHeadsStoreError> {
+        self.inner.get_op_heads().await
+    }
+
+    async fn lock(&self) -> Result<Box<dyn OpHeadsStoreLock + '_>, OpHeadsStoreError> {
+        // Return a no-op lock: read-only mode never needs write coordination.
+        Ok(Box::new(NoOpLock))
+    }
+}

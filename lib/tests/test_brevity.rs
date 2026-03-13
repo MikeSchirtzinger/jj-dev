@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "brevity")]
-
 use std::path::Path;
 
 use jj_lib::brevity;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_heads_store::OpHeadsStore;
+use jj_lib::op_heads_store::OpHeadsStore as _;
 use pollster::FutureExt as _;
 use testutils::TestRepo;
 use testutils::write_random_commit;
@@ -153,8 +151,9 @@ fn test_merge_agent_oplog() {
     tx.commit("agent work").unwrap();
 
     // Merge the agent's oplog back
-    let merged_op =
-        brevity::merge_agent_oplog(repo.loader(), repo_path, "agent-0").block_on().unwrap();
+    let merged_op = brevity::merge_agent_oplog(repo.loader(), repo_path, "agent-0")
+        .block_on()
+        .unwrap();
 
     // The merged operation should be new (not the original shared head)
     assert_ne!(merged_op.id(), repo.op_id());
@@ -279,9 +278,8 @@ fn test_agent_name_validation() {
     assert!(result.is_err());
 
     // Slash
-    let result =
-        brevity::fork_agent_oplog(repo_path, "agent/bad", repo.op_heads_store().as_ref())
-            .block_on();
+    let result = brevity::fork_agent_oplog(repo_path, "agent/bad", repo.op_heads_store().as_ref())
+        .block_on();
     assert!(result.is_err());
 
     // Starting with underscore

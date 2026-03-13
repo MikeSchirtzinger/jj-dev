@@ -9,6 +9,8 @@ fn test_no_forgotten_test_files() {
 mod test_annotate;
 mod test_bad_locking;
 mod test_bisect;
+#[cfg(feature = "brevity")]
+mod test_brevity;
 mod test_commit_builder;
 mod test_commit_concurrent;
 mod test_conflicts;
@@ -16,6 +18,7 @@ mod test_default_revset_graph_iterator;
 mod test_eol;
 mod test_evolution_predecessors;
 mod test_fix;
+mod test_forked_op_heads;
 mod test_git;
 mod test_git_backend;
 mod test_gpg;
@@ -41,6 +44,3 @@ mod test_signing;
 mod test_ssh_signing;
 mod test_view;
 mod test_workspace;
-mod test_forked_op_heads;
-#[cfg(feature = "brevity")]
-mod test_brevity;
