@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use jj_lib::forked_op_heads_store::ForkedOpHeadsStore;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_heads_store::OpHeadsStore;
+use jj_lib::op_heads_store::OpHeadsStore as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::repo::RepoLoader;
 use jj_lib::repo::StoreFactories;
@@ -70,7 +70,7 @@ fn test_forked_op_heads_update() {
 
     let id2 = OperationId::from_hex("11223344");
     forked
-        .update_op_heads(&[id1.clone()], &id2)
+        .update_op_heads(std::slice::from_ref(&id1), &id2)
         .block_on()
         .unwrap();
 

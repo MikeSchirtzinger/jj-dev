@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "brevity")]
-
 use std::path::Path;
 
 use jj_lib::brevity;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_heads_store::OpHeadsStore;
+use jj_lib::op_heads_store::OpHeadsStore as _;
 use pollster::FutureExt as _;
 use testutils::TestRepo;
 use testutils::write_random_commit;

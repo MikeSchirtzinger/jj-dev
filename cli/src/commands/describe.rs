@@ -497,8 +497,8 @@ pub(crate) fn cmd_describe(
         // Validate: --metadata-only requires at least one Hox metadata flag.
         if !has_hox_changes {
             return Err(user_error(
-                "--metadata-only requires at least one Hox metadata flag \
-                 (--set-status, --set-priority, --set-agent, etc.)",
+                "--metadata-only requires at least one Hox metadata flag (--set-status, \
+                 --set-priority, --set-agent, etc.)",
             ));
         }
         // Write operation to op_store but do NOT update op_heads.

@@ -98,6 +98,12 @@ impl ForkedOpHeadsStore {
         fork_op_id: OperationId,
         agent_op_heads_dir: &Path,
     ) -> Result<Self, OpHeadsStoreError> {
+        // Ensure the agent dir exists before initializing the private store.
+        std::fs::create_dir_all(agent_op_heads_dir).map_err(|e| OpHeadsStoreError::Write {
+            new_op_id: fork_op_id.clone(),
+            source: e.into(),
+        })?;
+
         // Initialize the private store — this creates `agent_op_heads_dir/heads/`.
         let private = SimpleOpHeadsStore::init(agent_op_heads_dir)
             .map_err(|e| OpHeadsStoreError::Read(e.into()))?;
