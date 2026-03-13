@@ -43,7 +43,6 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::forked_op_heads_store::ForkedOpHeadsStore;
-use crate::forked_op_heads_store::ForkedOpHeadsStoreInitError;
 use crate::op_heads_store::OpHeadsStore;
 use crate::op_heads_store::OpHeadsStoreError;
 use crate::op_store::OpStoreError;
@@ -64,8 +63,6 @@ pub enum BrevityError {
     Fork(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("IO error")]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Init(#[from] ForkedOpHeadsStoreInitError),
     #[error(transparent)]
     OpHeadsStore(#[from] OpHeadsStoreError),
     #[error(transparent)]
@@ -137,13 +134,16 @@ pub async fn fork_agent_oplog(
     fs::create_dir(&agent_dir)?;
 
     let op_heads_dir = agent_dir.join("op_heads");
-    fs::create_dir(&op_heads_dir)?;
 
-    // Get current heads from the source store
+    // Get current heads from the source store to determine the fork base
     let current_heads: Vec<OperationId> = source.get_op_heads().await?;
+    let fork_op_id = current_heads
+        .first()
+        .cloned()
+        .unwrap_or_else(|| OperationId::from_hex("0"));
 
-    // Initialize the forked store with the current heads
-    let forked_store = ForkedOpHeadsStore::init_from(&op_heads_dir, &current_heads)?;
+    // Initialize the forked store by forking from the source
+    let forked_store = ForkedOpHeadsStore::fork_from(source, fork_op_id, &op_heads_dir)?;
 
     // Write the type file for StoreFactories dispatch
     fs::write(op_heads_dir.join("type"), ForkedOpHeadsStore::name())?;
@@ -167,7 +167,7 @@ pub fn agent_repo_loader(
         return Err(BrevityError::NotFound(agent_name.to_string()));
     }
 
-    let forked_store = ForkedOpHeadsStore::load(&op_heads_dir);
+    let forked_store = ForkedOpHeadsStore::load(&op_heads_dir)?;
     Ok(RepoLoader::new(
         base_loader.settings().clone(),
         base_loader.store().clone(),
@@ -195,7 +195,7 @@ pub async fn merge_agent_oplog(
     }
 
     // Load agent's forked op heads
-    let forked_store = ForkedOpHeadsStore::load(&op_heads_dir);
+    let forked_store = ForkedOpHeadsStore::load(&op_heads_dir)?;
     let agent_head_ids = forked_store.get_op_heads().await?;
 
     // Load shared store's current op heads

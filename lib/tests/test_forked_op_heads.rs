@@ -21,6 +21,7 @@ use jj_lib::op_heads_store::OpHeadsStore;
 use jj_lib::op_store::OperationId;
 use jj_lib::repo::RepoLoader;
 use jj_lib::repo::StoreFactories;
+use jj_lib::simple_op_heads_store::SimpleOpHeadsStore;
 use pollster::FutureExt as _;
 use testutils::TestRepo;
 use testutils::write_random_commit;
@@ -34,94 +35,46 @@ fn list_dir(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn test_forked_op_heads_init() {
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
+fn test_forked_op_heads_fork_from() {
+    let parent_dir = testutils::new_temp_dir();
+    let agent_dir = testutils::new_temp_dir();
 
-    let store = ForkedOpHeadsStore::init(&store_dir).unwrap();
-    assert!(store_dir.join("heads").is_dir());
-
-    // Initially empty
-    let heads = store.get_op_heads().block_on().unwrap();
-    assert!(heads.is_empty());
-}
-
-#[test]
-fn test_forked_op_heads_init_from() {
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
-
+    // Create a parent store with one head.
+    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
-    let id2 = OperationId::from_hex("11223344");
-    let source_heads = vec![id1.clone(), id2.clone()];
+    parent.update_op_heads(&[], &id1).block_on().unwrap();
 
-    let store = ForkedOpHeadsStore::init_from(&store_dir, &source_heads).unwrap();
-    let mut heads: Vec<String> = store
+    let forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
+
+    let heads: Vec<String> = forked
         .get_op_heads()
         .block_on()
         .unwrap()
         .iter()
         .map(|id| id.hex())
         .collect();
-    heads.sort();
-
-    let mut expected = vec![id1.hex(), id2.hex()];
-    expected.sort();
-    assert_eq!(heads, expected);
+    assert!(heads.contains(&id1.hex()));
+    assert_eq!(forked.fork_base(), &id1);
 }
 
 #[test]
 fn test_forked_op_heads_update() {
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
+    let parent_dir = testutils::new_temp_dir();
+    let agent_dir = testutils::new_temp_dir();
 
+    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
+    parent.update_op_heads(&[], &id1).block_on().unwrap();
+
+    let forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
+
     let id2 = OperationId::from_hex("11223344");
-
-    let store = ForkedOpHeadsStore::init_from(&store_dir, &[id1.clone()]).unwrap();
-
-    // Update: remove id1, add id2
-    store
+    forked
         .update_op_heads(&[id1.clone()], &id2)
         .block_on()
         .unwrap();
 
-    let heads: Vec<String> = store
-        .get_op_heads()
-        .block_on()
-        .unwrap()
-        .iter()
-        .map(|id| id.hex())
-        .collect();
-    assert_eq!(heads, vec![id2.hex()]);
-
-    // The old file should be gone
-    assert!(!store_dir.join("heads").join(id1.hex()).exists());
-    // The new file should exist
-    assert!(store_dir.join("heads").join(id2.hex()).exists());
-}
-
-#[test]
-fn test_forked_op_heads_remove_nonexistent_is_ok() {
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
-
-    let id1 = OperationId::from_hex("aabbccdd");
-    let id2 = OperationId::from_hex("11223344");
-
-    let store = ForkedOpHeadsStore::init(&store_dir).unwrap();
-
-    // Removing a nonexistent head during update should not error (NFS tolerance)
-    store
-        .update_op_heads(&[id1.clone()], &id2)
-        .block_on()
-        .unwrap();
-
-    let heads: Vec<String> = store
+    let heads: Vec<String> = forked
         .get_op_heads()
         .block_on()
         .unwrap()
@@ -133,25 +86,45 @@ fn test_forked_op_heads_remove_nonexistent_is_ok() {
 
 #[test]
 fn test_forked_op_heads_lock() {
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
+    let parent_dir = testutils::new_temp_dir();
+    let agent_dir = testutils::new_temp_dir();
 
-    let store = ForkedOpHeadsStore::init(&store_dir).unwrap();
-    let _lock = store.lock().block_on().unwrap();
-    // Lock file should exist
-    assert!(store_dir.join("heads").join("lock").exists());
+    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
+    let id1 = OperationId::from_hex("aabbccdd");
+    parent.update_op_heads(&[], &id1).block_on().unwrap();
+
+    let forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
+    let _lock = forked.lock().block_on().unwrap();
 }
 
 #[test]
 fn test_forked_op_heads_name() {
     assert_eq!(ForkedOpHeadsStore::name(), "forked_op_heads_store");
+}
 
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
-    let store = ForkedOpHeadsStore::init(&store_dir).unwrap();
-    assert_eq!(OpHeadsStore::name(&store), "forked_op_heads_store");
+#[test]
+fn test_forked_op_heads_load_roundtrip() {
+    let parent_dir = testutils::new_temp_dir();
+    let agent_dir = testutils::new_temp_dir();
+
+    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
+    let id1 = OperationId::from_hex("aabbccdd");
+    parent.update_op_heads(&[], &id1).block_on().unwrap();
+
+    let _forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
+
+    // Reload from disk
+    let reloaded = ForkedOpHeadsStore::load(agent_dir.path()).unwrap();
+    assert_eq!(reloaded.fork_base(), &id1);
+
+    let heads: Vec<String> = reloaded
+        .get_op_heads()
+        .block_on()
+        .unwrap()
+        .iter()
+        .map(|id| id.hex())
+        .collect();
+    assert!(heads.contains(&id1.hex()));
 }
 
 #[test]
@@ -159,14 +132,20 @@ fn test_forked_store_registered_in_factories() {
     let factories = StoreFactories::default();
 
     // Write a type file and try loading
-    let temp_dir = testutils::new_temp_dir();
-    let store_dir = temp_dir.path().join("op_heads");
-    std::fs::create_dir(&store_dir).unwrap();
-    std::fs::write(store_dir.join("type"), "forked_op_heads_store").unwrap();
-    std::fs::create_dir(store_dir.join("heads")).unwrap();
+    let parent_dir = testutils::new_temp_dir();
+    let agent_dir = testutils::new_temp_dir();
+
+    // Create a parent, fork from it to get a valid forked store on disk
+    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
+    let id1 = OperationId::from_hex("aabbccdd");
+    parent.update_op_heads(&[], &id1).block_on().unwrap();
+    let _forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
+
+    // Write the type file
+    std::fs::write(agent_dir.path().join("type"), "forked_op_heads_store").unwrap();
 
     let settings = testutils::user_settings();
-    let loaded = factories.load_op_heads_store(&settings, &store_dir);
+    let loaded = factories.load_op_heads_store(&settings, agent_dir.path());
     assert!(loaded.is_ok());
     let store = loaded.unwrap();
     assert_eq!(store.name(), "forked_op_heads_store");
@@ -185,17 +164,16 @@ fn test_forked_op_heads_independent_of_shared() {
     let shared_heads_before = list_dir(&shared_op_heads_dir);
     assert_eq!(shared_heads_before.len(), 1);
 
-    // Create a forked store with the current head
-    let forked_dir = test_repo.env.root().join("agent-0-op-heads");
-    std::fs::create_dir(&forked_dir).unwrap();
+    // Get the current shared head IDs
+    let shared_head_ids: Vec<OperationId> =
+        repo.op_heads_store().get_op_heads().block_on().unwrap();
+    let fork_op_id = shared_head_ids.first().unwrap().clone();
 
-    let shared_head_ids: Vec<OperationId> = repo
-        .op_heads_store()
-        .get_op_heads()
-        .block_on()
-        .unwrap();
+    // Create a forked store using fork_from
+    let forked_dir = test_repo.env.root().join("agent-0-op-heads");
     let forked_store =
-        ForkedOpHeadsStore::init_from(&forked_dir, &shared_head_ids).unwrap();
+        ForkedOpHeadsStore::fork_from(repo.op_heads_store().as_ref(), fork_op_id, &forked_dir)
+            .unwrap();
 
     // Verify forked store has the same heads
     let forked_heads: Vec<String> = forked_store
