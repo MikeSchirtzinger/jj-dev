@@ -399,7 +399,12 @@ pub(crate) async fn cmd_describe(
                  (--set-status, --set-priority, --set-agent, etc.)",
             ));
         }
-        let unpublished = tx.into_inner().write(tx_description).await?;
+        // Commit rewrites leave pending descendant rebases. Rebase them before
+        // writing the unpublished operation so Transaction::write() remains
+        // valid without publishing this operation to other workspaces.
+        let mut inner_tx = tx.into_inner();
+        inner_tx.repo_mut().rebase_descendants().await?;
+        let unpublished = inner_tx.write(tx_description).await?;
         let op_id = unpublished.operation().id().hex();
         unpublished.leave_unpublished();
         writeln!(ui.status(), "Metadata-only op: {op_id}")?;
