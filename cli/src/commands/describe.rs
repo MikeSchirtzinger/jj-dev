@@ -504,7 +504,14 @@ pub(crate) fn cmd_describe(
         // Write operation to op_store but do NOT update op_heads.
         // Other workspaces will not see this as a new head, eliminating
         // cascading oplog staleness in parallel agent environments.
-        let unpublished = tx.into_inner().write(tx_description)?;
+        //
+        // We must rebase descendants before write() — the commit rewrites
+        // from metadata updates leave pending rebases, and Transaction::write()
+        // asserts !has_rewrites(). The rebase is still unpublished so other
+        // workspaces never see it.
+        let mut inner_tx = tx.into_inner();
+        inner_tx.repo_mut().rebase_descendants()?;
+        let unpublished = inner_tx.write(tx_description)?;
         let op_id = unpublished.operation().id().hex();
         // Leave unpublished: op is durable in op_store but not in op_heads.
         unpublished.leave_unpublished();

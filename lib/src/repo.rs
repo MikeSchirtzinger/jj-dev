@@ -722,8 +722,14 @@ impl RepoLoader {
             &repo_path.join("op_store"),
             root_op_data,
         )?);
+        // Support per-agent oplog isolation: JJ_OP_HEADS_DIR overrides the
+        // default op_heads path, letting parallel agents each use a private
+        // ForkedOpHeadsStore without cross-workspace staleness.
+        let op_heads_path = std::env::var("JJ_OP_HEADS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| repo_path.join("op_heads"));
         let op_heads_store =
-            Arc::from(store_factories.load_op_heads_store(settings, &repo_path.join("op_heads"))?);
+            Arc::from(store_factories.load_op_heads_store(settings, &op_heads_path)?);
         let index_store =
             Arc::from(store_factories.load_index_store(settings, &repo_path.join("index"))?);
         let submodule_store = Arc::from(
