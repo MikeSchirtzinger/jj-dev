@@ -880,12 +880,23 @@ impl RepoLoader {
             return Ok(self.root_operation().await);
         };
         let final_op = if num_operations > 1 {
+            // Keep all merged op heads around so we can harvest evolution
+            // (commit-predecessor) records for the post-merge dedup pass below.
+            let all_ops: Vec<Operation> =
+                std::iter::once(base_op.clone()).chain(operations).collect();
             let base_repo = self.load_at(&base_op).await?;
             let mut tx = base_repo.start_transaction();
-            for other_op in operations {
+            for other_op in all_ops.iter().skip(1).cloned() {
                 tx.merge_operation(other_op).await?;
                 tx.repo_mut().rebase_descendants().await?;
             }
+            // Pairwise merge + rebase_descendants between steps clears the
+            // rewrite map, so an older generation of a change merged in *after*
+            // its newer generation is already a head can be left visible as a
+            // separate head -> spurious divergence. Hide such evolution-ancestor
+            // heads in a single dedup pass driven by stored predecessor records.
+            tx.repo_mut().dedup_evolved_heads(&all_ops)?;
+            tx.repo_mut().rebase_descendants().await?;
             let tx_description = tx_description.map_or_else(
                 || format!("merge {num_operations} operations"),
                 |tx_description| tx_description.to_string(),
@@ -940,6 +951,31 @@ impl Rewrite {
             Self::Abandoned(new_parent_ids) => new_parent_ids.as_slice(),
         }
     }
+}
+
+/// Returns true if `ancestor` is a transitive predecessor (older evolution
+/// generation) of `descendant`, following new->old predecessor edges.
+fn is_transitive_predecessor(
+    preds: &HashMap<CommitId, Vec<CommitId>>,
+    ancestor: &CommitId,
+    descendant: &CommitId,
+) -> bool {
+    let mut stack = vec![descendant.clone()];
+    let mut seen = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        if let Some(olds) = preds.get(&cur) {
+            for old in olds {
+                if old == ancestor {
+                    return true;
+                }
+                stack.push(old.clone());
+            }
+        }
+    }
+    false
 }
 
 pub struct MutableRepo {
@@ -2040,6 +2076,124 @@ impl MutableRepo {
         )?;
         self.set_git_head_target(new_git_head_target);
 
+        Ok(())
+    }
+
+    /// Reconcile-time dedup: when multiple visible heads share a change id and
+    /// one is an *evolution ancestor* (transitive predecessor) of another, hide
+    /// the older generation.
+    ///
+    /// This repairs the case where pairwise op-head merging cleared the rewrite
+    /// map before an older generation of a change was merged in, leaving the old
+    /// and new generations both visible as heads (spurious divergence). The
+    /// predecessor relationship is recovered from the `commit_predecessors`
+    /// records stored on the operations being merged (and their ancestry).
+    pub fn dedup_evolved_heads(&mut self, merged_ops: &[Operation]) -> BackendResult<()> {
+        use crate::object_id::ObjectId as _;
+        let dbg = std::env::var("JJ_DEBUG_MERGE").is_ok();
+
+        // 0. Cheap pre-check: only changes with MULTIPLE visible heads can need
+        //    dedup. Group first so the common (no-duplicate) reconcile pays
+        //    almost nothing.
+        let heads: Vec<CommitId> = self.view().heads().iter().cloned().collect();
+        let mut heads_by_change: HashMap<ChangeId, Vec<CommitId>> = HashMap::new();
+        for id in &heads {
+            let commit = self.store().get_commit(id)?;
+            heads_by_change
+                .entry(commit.change_id().clone())
+                .or_default()
+                .push(id.clone());
+        }
+        heads_by_change.retain(|_, group| group.len() >= 2);
+        if heads_by_change.is_empty() {
+            return Ok(());
+        }
+
+        // 1. Bound the predecessor harvest to the MERGE CONE: operations since
+        //    the merged heads' closest common ancestor. Spurious divergence can
+        //    only be minted by rewrites recorded in the lineages being merged —
+        //    edges older than the common ancestor were already reconciled into
+        //    every side's base view. The bound also means pre-existing
+        //    (user-level) divergence is never retro-rewritten, and reconcile
+        //    cost stays proportional to the merge, not to total repo history.
+        let mut common_ancestor: Option<Operation> = None;
+        for op in merged_ops {
+            common_ancestor = match common_ancestor {
+                None => Some(op.clone()),
+                Some(ca) => dag_walk::closest_common_node_ok(
+                    [Ok::<_, OpStoreError>(ca)],
+                    [Ok::<_, OpStoreError>(op.clone())],
+                    |op: &Operation| op.id().clone(),
+                    |op: &Operation| op.parents().collect_vec(),
+                )
+                .map_err(|err| BackendError::Other(err.into()))?,
+            };
+        }
+        let stop_at: Option<OperationId> = common_ancestor.map(|op| op.id().clone());
+
+        // Hard cap: a stale head file can reference an op far from the rest of
+        // the graph (orphaned-op class), making the cone arbitrarily large.
+        // Past the cap we fail open to pre-dedup behaviour rather than stall
+        // every reconcile.
+        const MAX_HARVEST_OPS: usize = 10_000;
+
+        // 2. Harvest direct predecessor edges (new_commit -> [old_commits])
+        //    from operations inside the cone.
+        let mut preds: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
+        let mut seen_ops: HashSet<OperationId> = HashSet::new();
+        let mut op_stack: Vec<Operation> = merged_ops.to_vec();
+        while let Some(op) = op_stack.pop() {
+            if Some(op.id()) == stop_at.as_ref() {
+                continue;
+            }
+            if !seen_ops.insert(op.id().clone()) {
+                continue;
+            }
+            if seen_ops.len() > MAX_HARVEST_OPS {
+                if dbg {
+                    eprintln!(
+                        "[dedup_evolved_heads] merge cone exceeds {MAX_HARVEST_OPS} ops — \
+                         skipping dedup (fail-open)"
+                    );
+                }
+                return Ok(());
+            }
+            if let Some(map) = &op.store_operation().commit_predecessors {
+                for (new_id, old_ids) in map {
+                    preds
+                        .entry(new_id.clone())
+                        .or_default()
+                        .extend(old_ids.iter().cloned());
+                }
+            }
+            for parent in op.parents() {
+                op_stack.push(parent.map_err(|err| BackendError::Other(err.into()))?);
+            }
+        }
+        if preds.is_empty() {
+            return Ok(());
+        }
+
+        // 3. For each change with multiple visible heads, hide any head that is a
+        //    transitive predecessor of another visible head of the same change.
+        for (_change, group) in heads_by_change {
+            for old in &group {
+                if let Some(new) = group
+                    .iter()
+                    .find(|cand| *cand != old && is_transitive_predecessor(&preds, old, cand))
+                {
+                    if dbg {
+                        eprintln!(
+                            "[dedup_evolved_heads] hiding stale generation {} (predecessor of \
+                             visible head {})",
+                            &old.hex()[..8],
+                            &new.hex()[..8]
+                        );
+                    }
+                    self.set_rewritten_commit(old.clone(), new.clone());
+                }
+            }
+        }
         Ok(())
     }
 

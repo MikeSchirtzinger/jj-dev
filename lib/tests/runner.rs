@@ -15,6 +15,8 @@ mod test_commit_builder;
 mod test_commit_concurrent;
 mod test_conflicts;
 mod test_default_revset_graph_iterator;
+#[cfg(feature = "brevity")]
+mod test_divergence_repro;
 mod test_eol;
 mod test_evolution_predecessors;
 mod test_fix;
