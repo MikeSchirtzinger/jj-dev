@@ -2092,20 +2092,57 @@ impl MutableRepo {
         use crate::object_id::ObjectId as _;
         let dbg = std::env::var("JJ_DEBUG_MERGE").is_ok();
 
-        // 0. Cheap pre-check: only changes with MULTIPLE visible heads can need
-        //    dedup. Group first so the common (no-duplicate) reconcile pays
-        //    almost nothing.
-        let heads: Vec<CommitId> = self.view().heads().iter().cloned().collect();
-        let mut heads_by_change: HashMap<ChangeId, Vec<CommitId>> = HashMap::new();
-        for id in &heads {
-            let commit = self.store().get_commit(id)?;
-            heads_by_change
-                .entry(commit.change_id().clone())
-                .or_default()
-                .push(id.clone());
+        // 0. Cheap pre-check + CANDIDATE SELECTION.
+        //
+        //    The resurrected old generation is usually VISIBLE-BUT-NOT-A-HEAD: a
+        //    workspace working-copy commit sits on top of it, so its child keeps
+        //    it visible while it is itself absent from `view().heads()`. So we
+        //    must consider change ids of (heads ∪ parents-of-heads), then resolve
+        //    ALL visible commits per candidate via the change-id index (which
+        //    walks the whole visible set, not just heads).
+        //
+        //    `heads ∪ parents-of-heads` covers both production shapes: an old
+        //    generation pinned by a wc-commit child (the gen is a parent of the
+        //    wc head) and the both-generations-have-children case (each gen is a
+        //    parent of its own wc head). It only misses an old generation buried
+        //    two or more non-divergent commits below a head, which is not a shape
+        //    the workspace/snapshot rewrite cycle produces.
+        let head_ids: Vec<CommitId> = self.view().heads().iter().cloned().collect();
+        let mut candidate_changes: HashSet<ChangeId> = HashSet::new();
+        for head_id in &head_ids {
+            let head = self.store().get_commit(head_id)?;
+            candidate_changes.insert(head.change_id().clone());
+            for parent_id in head.parent_ids() {
+                let parent = self.store().get_commit(parent_id)?;
+                candidate_changes.insert(parent.change_id().clone());
+            }
         }
-        heads_by_change.retain(|_, group| group.len() >= 2);
-        if heads_by_change.is_empty() {
+
+        // Resolve every candidate change id to ALL of its visible commits, via a
+        // change-id index built ONCE over the visible set. Keep only the
+        // genuinely divergent ones (>1 visible commit of the same change).
+        let mut divergent_groups: Vec<Vec<CommitId>> = Vec::new();
+        {
+            let change_id_index = self.index.change_id_index(&mut self.view().heads().iter());
+            for change in &candidate_changes {
+                let prefix = HexPrefix::from_id(change);
+                let resolved = match change_id_index
+                    .resolve_prefix(&prefix)
+                    .map_err(|err| BackendError::Other(err.into()))?
+                {
+                    PrefixResolution::SingleMatch(targets) => targets,
+                    // A complete change id should never be ambiguous; no-match means
+                    // the change is not visible (nothing to dedup).
+                    PrefixResolution::NoMatch | PrefixResolution::AmbiguousMatch => continue,
+                };
+                if let Some(visible) = resolved.into_visible()
+                    && visible.len() >= 2
+                {
+                    divergent_groups.push(visible);
+                }
+            }
+        }
+        if divergent_groups.is_empty() {
             return Ok(());
         }
 
@@ -2174,10 +2211,14 @@ impl MutableRepo {
             return Ok(());
         }
 
-        // 3. For each change with multiple visible heads, hide any head that is a
-        //    transitive predecessor of another visible head of the same change.
-        for (_change, group) in heads_by_change {
-            for old in &group {
+        // 3. For each divergent change, hide any visible commit (head OR
+        //    visible-but-not-head) that is a transitive evolution-predecessor of
+        //    another visible commit of the same change. `set_rewritten_commit`
+        //    plus the final `rebase_descendants` then reparents any wc-commit
+        //    child of the hidden generation onto the surviving successor — which
+        //    is exactly the right outcome.
+        for group in &divergent_groups {
+            for old in group {
                 if let Some(new) = group
                     .iter()
                     .find(|cand| *cand != old && is_transitive_predecessor(&preds, old, cand))
@@ -2185,7 +2226,7 @@ impl MutableRepo {
                     if dbg {
                         eprintln!(
                             "[dedup_evolved_heads] hiding stale generation {} (predecessor of \
-                             visible head {})",
+                             visible commit {})",
                             &old.hex()[..8],
                             &new.hex()[..8]
                         );
