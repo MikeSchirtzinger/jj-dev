@@ -1750,3 +1750,401 @@ fn t7_mechanical_sibling_no_wc_lex_greatest_survives() {
 
     eprintln!("T7: stale-gen dedup (no-wc path) confirmed — G4 survives, C1 removed");
 }
+
+/// T8 EMPTY-vs-NONEMPTY SIBLING PAIR (run-11 shape).
+///
+/// Models the production scenario from run-11: the pairwise-merge carries the
+/// workspace wc commit to a new slice generation (producing an EMPTY sibling —
+/// it just moved parent, no content change), while the snapshot path produces a
+/// NON-EMPTY sibling (the agent actually wrote content to the working copy).
+///
+/// v3.2 must:
+///   - Remove the empty sibling (provably lossless).
+///   - Keep the non-empty sibling (the content is real).
+///   - Author zero new commits.
+///   - Leave exactly 1 visible commit for the wc change.
+#[test]
+fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let repo_dir = test_repo.repo_path().to_path_buf();
+
+    let content_path = repo_path("content.txt");
+
+    // 1. Create slice change C1 and wc commit W (empty — no content yet).
+    let mut tx = repo.start_transaction();
+    let c1 = create_random_commit(tx.repo_mut())
+        .set_description("slice[0] original")
+        .write()
+        .unwrap();
+    let slice_change = c1.change_id().clone();
+    // Wc commit W: empty (same tree as C1, which is the empty tree).
+    let w = tx
+        .repo_mut()
+        .new_commit(vec![c1.id().clone()], c1.tree())
+        .set_description("")
+        .write()
+        .unwrap();
+    let wc_change = w.change_id().clone();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo_shared = tx.commit("wc commit W on C1").unwrap();
+    let op_base = repo_shared.operation().clone();
+
+    // 2. LINEAGE A: agent writes real content to the wc → W1 (NON-EMPTY).
+    brevity::fork_agent_oplog(
+        &repo_dir,
+        "agentA-t8",
+        repo_shared.op_heads_store().as_ref(),
+    )
+    .block_on()
+    .unwrap();
+    let loader_a =
+        brevity::agent_repo_loader(repo_shared.loader(), &repo_dir, "agentA-t8").unwrap();
+    let repo_a = loader_a.load_at_head().unwrap();
+    let w_reloaded = repo_a.store().get_commit(w.id()).unwrap();
+    let tree_with_content = create_tree(repo, &[(&content_path, "agent wrote this\n")]);
+    let mut tx = repo_a.start_transaction();
+    let w1 = tx
+        .repo_mut()
+        .rewrite_commit(&w_reloaded)
+        .set_description("")
+        .set_tree(tree_with_content)
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_lineage_a = tx
+        .commit("snapshot wc W → W1 (non-empty)")
+        .unwrap()
+        .operation()
+        .clone();
+
+    // Verify W1 is non-empty.
+    {
+        let repo_check = loader_a.load_at(&op_lineage_a).unwrap();
+        let w1_check = repo_check.store().get_commit(w1.id()).unwrap();
+        assert!(
+            !w1_check.is_empty(&*repo_check).unwrap_or(true),
+            "T8 setup: W1 must be non-empty"
+        );
+    }
+
+    // 3. LINEAGE B: squashes C1 → G4 (slice done); rebase_descendants carries
+    //    W (the wc commit) onto G4 → W_b (EMPTY: same tree, just new parent).
+    brevity::fork_agent_oplog(
+        &repo_dir,
+        "agentB-t8",
+        repo_shared.op_heads_store().as_ref(),
+    )
+    .block_on()
+    .unwrap();
+    let loader_b =
+        brevity::agent_repo_loader(repo_shared.loader(), &repo_dir, "agentB-t8").unwrap();
+    let repo_b = loader_b.load_at_head().unwrap();
+    let c1_b = repo_b.store().get_commit(c1.id()).unwrap();
+    let mut tx = repo_b.start_transaction();
+    let g4 = tx
+        .repo_mut()
+        .rewrite_commit(&c1_b)
+        .set_description("[Slice 0] final")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_lineage_b = tx.commit("squash C1 → G4").unwrap().operation().clone();
+
+    eprintln!(
+        "T8: slice={} -> {} ; wc_orig={}",
+        &c1.id().hex()[..8],
+        &g4.id().hex()[..8],
+        &w.id().hex()[..8]
+    );
+
+    // 4. Reconcile: the pairwise-merge rebase of W1 onto G4 creates W1' (non-empty,
+    //    merge-authored), and W_b (empty, from lineage B's carry) is also a head.
+    //    v3.2 must remove W_b (empty) and keep W1' (non-empty).
+    let ops = vec![op_base, op_lineage_a, op_lineage_b];
+    let merged = repo
+        .loader()
+        .merge_operations(ops.clone(), Some("reconcile T8"))
+        .unwrap();
+
+    // No authoring constraint: only HONEST rewrites (W1'→W1 chain) are allowed.
+    assert_authored_commits_are_honest_rewrites(repo.loader(), &ops, &merged, "T8");
+
+    let reloaded = repo.loader().load_at(&merged).unwrap();
+    dump_chain(&reloaded, "T8 (empty-vs-nonempty wc siblings)");
+
+    let by_change = visible_commits_by_change(&reloaded);
+    let wc_visible = by_change.get(&wc_change).map(|v| v.len()).unwrap_or(0);
+    let slice_visible = by_change.get(&slice_change).map(|v| v.len()).unwrap_or(0);
+    eprintln!("T8: wc_visible={wc_visible} slice_visible={slice_visible}");
+
+    // Exactly 1 visible wc commit (the non-empty one).
+    assert_eq!(
+        wc_visible, 1,
+        "T8: expected exactly 1 visible wc commit after v3.2 empty-sibling cleanup; got \
+         {wc_visible}"
+    );
+
+    // Verify the surviving wc commit is non-empty.
+    let surviving_wc_id = &by_change[&wc_change][0];
+    let surviving_commit = reloaded.store().get_commit(surviving_wc_id).unwrap();
+    assert!(
+        !surviving_commit.is_empty(&*reloaded).unwrap_or(true),
+        "T8: the surviving wc commit must be non-empty (the content-bearing one); got empty"
+    );
+
+    // Exactly 1 visible slice commit.
+    assert_eq!(
+        slice_visible, 1,
+        "T8: expected exactly 1 visible slice commit; got {slice_visible}"
+    );
+
+    eprintln!("T8: empty-vs-nonempty cleanup confirmed — non-empty survives");
+}
+
+/// T9 EMPTY SIBLING IS WC-REFERENCED — FAIL-OPEN (wc protection wins).
+///
+/// Same shape as T8, but the workspace's current wc commit is the EMPTY one.
+/// Guard (a) (wc-referenced → not removable) must fire, leaving both siblings
+/// visible. Zero new commits authored.
+#[test]
+fn t9_empty_sibling_is_wc_referenced_fail_open() {
+    use jj_lib::repo::MutableRepo;
+
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let content_path = repo_path("content.txt");
+
+    // Build: a non-empty commit and an empty commit for the same change id,
+    // then register the EMPTY one as the workspace wc commit.
+    let mut tx = repo.start_transaction();
+    let base = create_random_commit(tx.repo_mut())
+        .set_description("base")
+        .write()
+        .unwrap();
+    let wc_change = base.change_id().clone();
+    let repo_base = tx.commit("base").unwrap();
+    let op_base = repo_base.operation().clone();
+
+    // Non-empty rewrite.
+    let tree_ne = create_tree(repo, &[(&content_path, "real content\n")]);
+    let mut tx = repo_base.start_transaction();
+    let nonempty_commit = tx
+        .repo_mut()
+        .rewrite_commit(&base)
+        .set_description("")
+        .set_tree(tree_ne)
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo_ne = tx.commit("non-empty rewrite").unwrap();
+    let op_ne = repo_ne.operation().clone();
+
+    // Empty rewrite (same tree as base — provably empty).
+    let mut tx = repo_base.start_transaction();
+    let empty_commit = tx
+        .repo_mut()
+        .rewrite_commit(&base)
+        .set_description("")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo_em = tx.commit("empty rewrite").unwrap();
+    let op_em = repo_em.operation().clone();
+
+    // Hand-build divergent view: both nonempty_commit and empty_commit are heads.
+    // Register the EMPTY commit as the workspace wc commit.
+    let mut tx = repo_em.start_transaction();
+    let mut_repo: &mut MutableRepo = tx.repo_mut();
+    let ne_commit = mut_repo.store().get_commit(nonempty_commit.id()).unwrap();
+    mut_repo.add_head(&ne_commit).unwrap();
+    mut_repo
+        .set_wc_commit(
+            jj_lib::ref_name::WorkspaceNameBuf::from("test-wc"),
+            empty_commit.id().clone(),
+        )
+        .unwrap();
+    mut_repo.rebase_descendants().unwrap();
+
+    // Pre-dedup: both visible.
+    let pre_vis = {
+        let mut heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
+        let mut seen: HashSet<CommitId> = HashSet::new();
+        let mut count = 0;
+        while let Some(id) = heads.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Ok(c) = tx.repo().store().get_commit(&id) {
+                if *c.change_id() == wc_change {
+                    count += 1;
+                }
+                for pid in c.parent_ids() {
+                    heads.push(pid.clone());
+                }
+            }
+        }
+        count
+    };
+    assert!(
+        pre_vis >= 2,
+        "T9 setup: both siblings must be visible before dedup"
+    );
+
+    // Invoke dedup.  The empty commit IS wc-referenced → guard (a) must fire.
+    // The non-empty commit is the candidate; it fails guard (b) because it is
+    // non-empty and non-tree-identical to the empty survivor → also fail-open.
+    let merged_ops = [op_base, op_ne, op_em];
+    tx.repo_mut()
+        .dedup_evolved_heads(&merged_ops, None)
+        .unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+
+    // No authoring.
+    assert_eq!(
+        rebased, 0,
+        "T9: dedup must not author commits; got {rebased}"
+    );
+
+    // Both siblings must remain (wc protection for the empty one, non-identical
+    // trees for the non-empty candidate).
+    let post_vis = {
+        let mut heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
+        let mut seen: HashSet<CommitId> = HashSet::new();
+        let mut count = 0;
+        while let Some(id) = heads.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Ok(c) = tx.repo().store().get_commit(&id) {
+                if *c.change_id() == wc_change {
+                    count += 1;
+                }
+                for pid in c.parent_ids() {
+                    heads.push(pid.clone());
+                }
+            }
+        }
+        count
+    };
+    assert_eq!(
+        post_vis, 2,
+        "T9: both siblings must remain when empty sibling is wc-referenced; got {post_vis}"
+    );
+
+    // The wc commit must still be the empty one.
+    let wc_id = tx
+        .repo()
+        .view()
+        .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::new("test-wc"));
+    assert_eq!(
+        wc_id,
+        Some(empty_commit.id()),
+        "T9: empty wc commit must not be removed"
+    );
+
+    eprintln!("T9: wc protection for empty sibling confirmed — fail-open");
+    drop((nonempty_commit, empty_commit));
+}
+
+/// T10 BOTH NON-EMPTY, DIFFERENT TREES — STILL FAIL-OPEN.
+///
+/// Regression: v3.2 must not change the behavior for non-empty non-identical
+/// siblings. Guard (b) must still fire → fail-open (both remain, no authoring).
+/// This is the same check as T6 but exercised via the full merge_operations path.
+#[test]
+fn t10_both_nonempty_different_trees_still_fail_open() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let repo_path_buf = test_repo.repo_path().to_path_buf();
+
+    let path_a = repo_path("file_a.txt");
+    let path_b = repo_path("file_b.txt");
+
+    // Create a shared base commit.
+    let mut tx = repo.start_transaction();
+    let base = create_random_commit(tx.repo_mut())
+        .set_description("base")
+        .write()
+        .unwrap();
+    let wc_change = base.change_id().clone();
+    let repo_base = tx.commit("base").unwrap();
+    let op_base = repo_base.operation().clone();
+
+    // Lineage A: rewrite base with tree_a content.
+    let tree_a = create_tree(repo, &[(&path_a, "content from A\n")]);
+    brevity::fork_agent_oplog(
+        &repo_path_buf,
+        "agentA-t10",
+        repo_base.op_heads_store().as_ref(),
+    )
+    .block_on()
+    .unwrap();
+    let loader_a =
+        brevity::agent_repo_loader(repo_base.loader(), &repo_path_buf, "agentA-t10").unwrap();
+    let repo_a = loader_a.load_at_head().unwrap();
+    let base_a = repo_a.store().get_commit(base.id()).unwrap();
+    let mut tx = repo_a.start_transaction();
+    let _sibling_a = tx
+        .repo_mut()
+        .rewrite_commit(&base_a)
+        .set_description("")
+        .set_tree(tree_a)
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_a = tx
+        .commit("rewrite base → content-A")
+        .unwrap()
+        .operation()
+        .clone();
+
+    // Lineage B: rewrite base with tree_b content (different).
+    let tree_b = create_tree(repo, &[(&path_b, "content from B\n")]);
+    brevity::fork_agent_oplog(
+        &repo_path_buf,
+        "agentB-t10",
+        repo_base.op_heads_store().as_ref(),
+    )
+    .block_on()
+    .unwrap();
+    let loader_b =
+        brevity::agent_repo_loader(repo_base.loader(), &repo_path_buf, "agentB-t10").unwrap();
+    let repo_b = loader_b.load_at_head().unwrap();
+    let base_b = repo_b.store().get_commit(base.id()).unwrap();
+    let mut tx = repo_b.start_transaction();
+    let _sibling_b = tx
+        .repo_mut()
+        .rewrite_commit(&base_b)
+        .set_description("")
+        .set_tree(tree_b)
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_b = tx
+        .commit("rewrite base → content-B")
+        .unwrap()
+        .operation()
+        .clone();
+
+    // Reconcile.
+    let ops = vec![op_base, op_a, op_b];
+    let merged = repo
+        .loader()
+        .merge_operations(ops.clone(), Some("reconcile T10"))
+        .unwrap();
+
+    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let by_change = visible_commits_by_change(&reloaded);
+    let wc_visible = by_change.get(&wc_change).map(|v| v.len()).unwrap_or(0);
+    eprintln!("T10: wc_visible={wc_visible}");
+
+    // FAIL-OPEN: both non-empty non-identical siblings remain visible.
+    assert_eq!(
+        wc_visible, 2,
+        "T10: non-empty non-identical siblings must both remain visible; got {wc_visible}"
+    );
+
+    eprintln!("T10: both non-empty different-tree siblings remain — fail-open confirmed");
+}

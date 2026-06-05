@@ -2607,21 +2607,26 @@ impl MutableRepo {
         //
         //    Guards before removing a mechanical sibling h in favour of survivor S:
         //      (a) h is a view head AND not wc-referenced in the merged view
-        //      (b) h.tree_ids() == S.tree_ids()  — tree-identical: provably zero
-        //          content loss; non-identical siblings are HONEST divergence → fail open
+        //      (b) content-safe: EITHER h.tree_ids() == S.tree_ids() (tree-identical,
+        //          provably lossless) OR h is EMPTY (h.tree_ids() == its auto-merged
+        //          parents' tree, i.e. Commit::is_empty() — an empty sibling carries
+        //          no content, so hiding it is also lossless). Non-identical non-empty
+        //          siblings are HONEST divergence → fail open.
         //      (c) at least one member of the sibling group was authored by THIS merge
         //          process — i.e., its id appears as a key in `self.commit_predecessors`
         //          (the in-flight rewrite map that has not yet been committed to disk).
-        //          This is the definitive discriminant between mechanical siblings
-        //          (pairwise-merge rebase created one of them) and genuine concurrent
-        //          divergence (two independent agents both rewrote the same commit;
-        //          neither rewrite appears in the merge's own commit_predecessors).
+        //          This is the definitive discriminant between merge-created mechanical
+        //          siblings and genuine concurrent rewrites. EXCEPTION: for the
+        //          EMPTY-sibling case (candidate h is empty), guard (c) is relaxed —
+        //          empty siblings that survive across multiple reconciles never appear
+        //          in any merge's commit_predecessors, but they are still provably
+        //          lossless to remove. Guard (b) + guard (a) (no wc ref) is sufficient.
         //      (d) passes the same exclusive-ancestor validation as stale-gen removals,
         //          evaluated against (all_stale ∪ already-approved mechanical siblings)
         //
-        //    Survivor selection: wc-referenced member wins; if none, pick
-        //    lexicographically greatest commit id (stable across concurrent reconciles,
-        //    never uses timestamps which can vary per clock).
+        //    Survivor selection: non-empty member wins over empty; among same emptiness
+        //    class, wc-referenced wins; otherwise lex-greatest commit id (stable across
+        //    concurrent reconciles, never uses timestamps which can vary per clock).
 
         // Re-collect the current head set after step 4 removals.
         let post_step4_heads: Vec<CommitId> = self.view().heads().iter().cloned().collect();
@@ -2673,15 +2678,51 @@ impl MutableRepo {
             self.commit_predecessors.keys().cloned().collect();
 
         for group in &remaining_divergent {
-            // Guard (c) requires at least one group member to be merge-authored.
-            // A group where NO member is merge-authored is genuine concurrent
-            // divergence — do not touch it.
+            // Determine whether any group member is empty (carries no content vs
+            // its parents). Precompute to use in guard-c relaxation and survivor
+            // selection. Fail-open on Repo errors (treat as non-empty).
+            // Two-step to avoid overlapping borrows: fetch commits first, then
+            // call is_empty with &*self (an immutable re-borrow of &mut self).
+            let member_empty: HashMap<&CommitId, bool> = {
+                let commits: Vec<(&CommitId, Commit)> = group
+                    .iter()
+                    .filter_map(|id| {
+                        let commit = self.store().get_commit(id).ok()?;
+                        Some((id, commit))
+                    })
+                    .collect();
+                commits
+                    .into_iter()
+                    .map(|(id, commit)| {
+                        let empty = commit.is_empty(&*self).unwrap_or(false);
+                        (id, empty)
+                    })
+                    .collect()
+            };
+
+            // Guard (c) pre-check: group-level discriminant.
+            //   • For non-empty candidate paths: require at least one merge-authored
+            //     member (definitive discriminant vs genuine concurrent divergence).
+            //   • For the empty-candidate path: guard (c) is relaxed — an empty
+            //     non-wc-referenced sibling is provably lossless and may persist
+            //     across many reconciles without ever entering commit_predecessors.
+            //     We still check the group has at least one non-empty survivor candidate
+            //     (to avoid removing ALL members of an all-empty group, which would
+            //     be valid but degenerate and is outside the designed use-case).
             let any_merge_authored = group.iter().any(|id| merge_authored_ids.contains(id));
-            if !any_merge_authored {
+            let any_empty_non_wc = group
+                .iter()
+                .any(|id| *member_empty.get(id).unwrap_or(&false) && !wc_ids.contains(id));
+            let any_non_empty = group
+                .iter()
+                .any(|id| !member_empty.get(id).unwrap_or(&false));
+
+            // Skip the group entirely if neither path applies.
+            if !(any_merge_authored || any_empty_non_wc && any_non_empty) {
                 if let Some(log) = debug_log {
                     log(&format!(
-                        "[dedup_evolved_heads] mechanical-sibling group for change {:?} has no \
-                         merge-authored member — genuine concurrent divergence, skipping",
+                        "[dedup_evolved_heads] mechanical-sibling group for change {} has no \
+                         merge-authored member and no removable empty sibling — skipping",
                         group
                             .first()
                             .and_then(|id| self.store().get_commit(id).ok())
@@ -2694,11 +2735,20 @@ impl MutableRepo {
                 continue;
             }
 
-            // Pick the survivor: wc-referenced first; otherwise lexicographically
-            // greatest commit id (stable, deterministic).
+            // Pick the survivor:
+            //   1. Non-empty wc-referenced member (content + workspace anchor)
+            //   2. Any non-empty member (prefer content over empty)
+            //   3. Wc-referenced member (fallback, all members empty)
+            //   4. Lex-greatest commit id (stable, deterministic)
             let survivor_id = group
                 .iter()
-                .find(|id| wc_ids.contains(*id))
+                .find(|id| !member_empty.get(*id).unwrap_or(&false) && wc_ids.contains(*id))
+                .or_else(|| {
+                    group
+                        .iter()
+                        .find(|id| !member_empty.get(*id).unwrap_or(&false))
+                })
+                .or_else(|| group.iter().find(|id| wc_ids.contains(*id)))
                 .or_else(|| group.iter().max_by(|a, b| a.hex().cmp(&b.hex())))
                 .cloned();
             let Some(survivor_id) = survivor_id else {
@@ -2712,6 +2762,8 @@ impl MutableRepo {
 
             // Determine candidates for removal (non-survivor members).
             let mut sibling_removals: HashSet<CommitId> = HashSet::new();
+            // Track which removals are "empty" path for logging.
+            let mut empty_removals: HashSet<CommitId> = HashSet::new();
 
             for member_id in group {
                 if member_id == &survivor_id {
@@ -2735,12 +2787,17 @@ impl MutableRepo {
                     Err(_) => continue,
                 };
 
-                // (b) tree-identical to survivor.
-                if member.tree_ids() != survivor.tree_ids() {
+                let member_is_empty = *member_empty.get(member_id).unwrap_or(&false);
+
+                // (b) content-safe: tree-identical to survivor OR the candidate is
+                //     empty (carries no content vs its parents — lossless by definition).
+                //     Non-identical non-empty → honest divergence → fail-open.
+                if !member_is_empty && member.tree_ids() != survivor.tree_ids() {
                     if let Some(log) = debug_log {
                         log(&format!(
                             "[dedup_evolved_heads] sibling group for change {} not \
-                             tree-identical ({} vs {}) — fail-open (honest divergence)",
+                             tree-identical and non-empty ({} vs {}) — fail-open \
+                             (honest divergence)",
                             &member.change_id().reverse_hex()
                                 [..12.min(member.change_id().reverse_hex().len())],
                             &member_id.hex()[..8],
@@ -2748,6 +2805,15 @@ impl MutableRepo {
                         ));
                     }
                     continue;
+                }
+
+                // Guard (c) per-member: for non-empty tree-identical members, require
+                // the group to have a merge-authored member (checked at group level).
+                // For empty members the relaxed path is already gated at group level
+                // (any_empty_non_wc && any_non_empty). No per-member recheck needed.
+                // Mark which candidates are on the empty path for logging.
+                if member_is_empty {
+                    empty_removals.insert(member_id.clone());
                 }
 
                 sibling_removals.insert(member_id.clone());
@@ -2828,12 +2894,21 @@ impl MutableRepo {
             // Apply the validated mechanical-sibling removals.
             for removal_id in &sibling_removals {
                 if let Some(log) = debug_log {
-                    log(&format!(
-                        "[dedup_evolved_heads] removing mechanical sibling {} (tree-identical \
-                         to survivor {})",
-                        &removal_id.hex()[..8],
-                        &survivor_id.hex()[..8]
-                    ));
+                    if empty_removals.contains(removal_id) {
+                        log(&format!(
+                            "[dedup_evolved_heads] removing empty mechanical sibling {} \
+                             (survivor {})",
+                            &removal_id.hex()[..8],
+                            &survivor_id.hex()[..8]
+                        ));
+                    } else {
+                        log(&format!(
+                            "[dedup_evolved_heads] removing mechanical sibling {} \
+                             (tree-identical to survivor {})",
+                            &removal_id.hex()[..8],
+                            &survivor_id.hex()[..8]
+                        ));
+                    }
                 }
                 self.remove_head(removal_id);
                 approved_mechanical.insert(removal_id.clone());
