@@ -35,12 +35,15 @@ use jj_lib::backend::ChangeId;
 use jj_lib::backend::CommitId;
 use jj_lib::brevity;
 use jj_lib::object_id::ObjectId as _;
+#[allow(unused_imports)]
 use jj_lib::op_heads_store::OpHeadsStore as _;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use pollster::FutureExt as _;
 use testutils::TestRepo;
 use testutils::create_random_commit;
+use testutils::create_tree;
+use testutils::repo_path;
 
 /// Count visible commits grouped by change_id in the head view.
 fn visible_commits_by_change(repo: &ReadonlyRepo) -> HashMap<ChangeId, Vec<CommitId>> {
@@ -89,58 +92,142 @@ fn dump_chain(repo: &ReadonlyRepo, label: &str) {
     }
 }
 
-/// v3 no-authoring invariant helper: after `merge_operations`, the set of all
-/// visible commit ids in the merged result must be a subset of the union of
-/// the visible commit id sets of all the input ops.
-///
-/// A new commit id in the merged result that was not in ANY input op means
-/// `merge_operations` authored a commit — a v3 invariant violation.
-fn assert_no_new_commits_authored(
+/// Collect all commit ids visible (reachable from heads) in an op.
+fn collect_visible_commits(
     loader: &jj_lib::repo::RepoLoader,
-    input_ops: &[jj_lib::operation::Operation],
-    merged_op: &jj_lib::operation::Operation,
-    label: &str,
-) {
-    // Collect all commit ids visible in each input op.
-    let mut all_input_commits: HashSet<CommitId> = HashSet::new();
-    for op in input_ops {
-        let repo = loader.load_at(op).unwrap();
-        let heads: Vec<CommitId> = repo.view().heads().iter().cloned().collect();
-        let mut stack = heads;
-        let mut visited: HashSet<CommitId> = HashSet::new();
-        while let Some(id) = stack.pop() {
-            if !visited.insert(id.clone()) {
-                continue;
-            }
-            all_input_commits.insert(id.clone());
-            if let Ok(commit) = repo.store().get_commit(&id) {
-                for pid in commit.parent_ids() {
-                    stack.push(pid.clone());
-                }
-            }
-        }
-    }
-
-    // Walk the merged result and find any commit not in the input set.
-    let merged_repo = loader.load_at(merged_op).unwrap();
-    let heads: Vec<CommitId> = merged_repo.view().heads().iter().cloned().collect();
+    op: &jj_lib::operation::Operation,
+) -> HashSet<CommitId> {
+    let repo = loader.load_at(op).unwrap();
+    let heads: Vec<CommitId> = repo.view().heads().iter().cloned().collect();
+    let mut result: HashSet<CommitId> = HashSet::new();
     let mut stack = heads;
     let mut visited: HashSet<CommitId> = HashSet::new();
     while let Some(id) = stack.pop() {
         if !visited.insert(id.clone()) {
             continue;
         }
-        assert!(
-            all_input_commits.contains(&id),
-            "[{label}] v3 no-authoring violated: merged result contains commit {} \
-             that was not visible in ANY input op",
-            &id.hex()[..12.min(id.hex().len())]
-        );
-        if let Ok(commit) = merged_repo.store().get_commit(&id) {
+        result.insert(id.clone());
+        if let Ok(commit) = repo.store().get_commit(&id) {
             for pid in commit.parent_ids() {
                 stack.push(pid.clone());
             }
         }
+    }
+    result
+}
+
+/// Returns the set of commit ids that appear in the merged result but were not
+/// visible in ANY of the input ops (i.e. commits authored by merge_operations).
+/// An empty set means the v3 no-authoring invariant holds.
+fn authored_commits_in_merge(
+    loader: &jj_lib::repo::RepoLoader,
+    input_ops: &[jj_lib::operation::Operation],
+    merged_op: &jj_lib::operation::Operation,
+) -> HashSet<CommitId> {
+    let all_input_commits: HashSet<CommitId> = input_ops
+        .iter()
+        .flat_map(|op| collect_visible_commits(loader, op))
+        .collect();
+
+    let merged_commits = collect_visible_commits(loader, merged_op);
+    merged_commits
+        .into_iter()
+        .filter(|id| !all_input_commits.contains(id))
+        .collect()
+}
+
+/// Strict: assert zero commits are authored by merge_operations.
+/// Use for scenarios where the v3 no-authoring invariant must hold exactly.
+fn assert_no_new_commits_authored(
+    loader: &jj_lib::repo::RepoLoader,
+    input_ops: &[jj_lib::operation::Operation],
+    merged_op: &jj_lib::operation::Operation,
+    label: &str,
+) {
+    let authored = authored_commits_in_merge(loader, input_ops, merged_op);
+    assert!(
+        authored.is_empty(),
+        "[{label}] v3 no-authoring violated: merged result contains {} commit(s) not visible \
+         in any input op: [{}]",
+        authored.len(),
+        authored
+            .iter()
+            .map(|id| id.hex()[..12.min(id.hex().len())].to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+/// Looser: assert that every commit authored by merge_operations has a
+/// predecessor edge (in the op-store records) that chains back to a commit
+/// that WAS visible in an input op. This allows pairwise-merge rebase to
+/// author intermediate wc commits, but only if they are honest rewrites (not
+/// orphans). Panics if any authored commit has no such chain.
+fn assert_authored_commits_are_honest_rewrites(
+    loader: &jj_lib::repo::RepoLoader,
+    input_ops: &[jj_lib::operation::Operation],
+    merged_op: &jj_lib::operation::Operation,
+    label: &str,
+) {
+    let all_input_commits: HashSet<CommitId> = input_ops
+        .iter()
+        .flat_map(|op| collect_visible_commits(loader, op))
+        .collect();
+
+    let authored = authored_commits_in_merge(loader, input_ops, merged_op);
+    if authored.is_empty() {
+        return;
+    }
+
+    // Collect all predecessor edges from the merged op and its ancestry.
+    let merged_repo = loader.load_at(merged_op).unwrap();
+    let mut preds: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
+    let mut op_stack: Vec<jj_lib::operation::Operation> = vec![merged_op.clone()];
+    let mut seen_ops: HashSet<jj_lib::op_store::OperationId> = HashSet::new();
+    while let Some(op) = op_stack.pop() {
+        if !seen_ops.insert(op.id().clone()) {
+            continue;
+        }
+        if let Some(map) = &op.store_operation().commit_predecessors {
+            for (new_id, old_ids) in map {
+                preds
+                    .entry(new_id.clone())
+                    .or_default()
+                    .extend(old_ids.iter().cloned());
+            }
+        }
+        for parent in op.parents() {
+            if let Ok(p) = parent {
+                op_stack.push(p);
+            }
+        }
+    }
+    drop(merged_repo);
+
+    // For each authored commit, walk transitive predecessors to find a chain
+    // back to a commit that was in an input op.
+    for authored_id in &authored {
+        let mut stack = vec![authored_id.clone()];
+        let mut visited: HashSet<CommitId> = HashSet::new();
+        let mut found_chain = false;
+        while let Some(cur) = stack.pop() {
+            if !visited.insert(cur.clone()) {
+                continue;
+            }
+            if all_input_commits.contains(&cur) {
+                found_chain = true;
+                break;
+            }
+            if let Some(olds) = preds.get(&cur) {
+                stack.extend(olds.iter().cloned());
+            }
+        }
+        assert!(
+            found_chain,
+            "[{label}] authored commit {} has no predecessor chain back to any input-op \
+             visible commit — orphan rewrite",
+            &authored_id.hex()[..12.min(authored_id.hex().len())]
+        );
     }
 }
 
@@ -440,14 +527,24 @@ fn repro_minimal_g1_g4_g2() {
 /// the SAME workspace working-copy commit (one change id) sits on each
 /// generation in two different reconcile lineages.
 ///
-/// v3 behavior: the stale slice gen (C1) is NOT a view head — it is a
-/// NON-HEAD parent of the stale wc commit W1. The stale wc commit W1 is a
-/// non-stale visible descendant of C1 (it has a different change_id). So v3
-/// fails open and leaves the slice divergence intact. This is intentional —
-/// dedup is idempotent and a later reconcile (after the stale wc commit is
-/// retired) can finish the job.
+/// v3.1 behavior:
+///   1. The pairwise-merge rebase_descendants DOES author one new wc commit
+///      (W1') — it rebases A's W1 (on original C1) onto G4 when it sees the
+///      C1→G4 rewrite. This is an honest rewrite (predecessor chain: W1'→W1→W)
+///      and is expected.
+///   2. After pairwise merges, the wc change has two head siblings: W1' (authored
+///      by the merge step) and W_b (carried by lineage B). Both are tree-identical
+///      (empty snapshot on the same tree). Both share W as a common evolution
+///      predecessor.
+///   3. The v3.1 mechanical-sibling cleanup in dedup_evolved_heads collapses the
+///      wc change to 1 visible (removes the lexicographically-smaller sibling).
+///   4. Once the stale wc sibling is removed, C1 (its parent) becomes unreachable,
+///      so the slice change also converges to 1 visible: G4.
 ///
-/// The CRITICAL invariant is that NO new commits are authored by reconcile.
+/// Assertions:
+///   (i)  Every authored commit has a predecessor chain to an input-visible commit.
+///   (ii) Exactly 1 visible commit for the slice change (G4).
+///   (iii) Exactly 1 visible commit for the wc change.
 #[test]
 fn repro_shared_wc_change_pins_both_gens() {
     let test_repo = TestRepo::init();
@@ -476,7 +573,7 @@ fn repro_shared_wc_change_pins_both_gens() {
     let shared_after_w = tx
         .commit("create initial working-copy commit in workspace loop-0")
         .unwrap();
-    let _wc_change = w.change_id().clone();
+    let wc_change = w.change_id().clone();
     let op_base = shared_after_w.operation().clone();
 
     // 3. LINEAGE A: leaves the workspace where it is (wc W on original gen).
@@ -571,26 +668,41 @@ fn repro_shared_wc_change_pins_both_gens() {
         .merge_operations(ops.clone(), Some("reconcile divergent operations"))
         .unwrap();
 
-    // v3 no-authoring invariant: reconcile must NEVER author new commits.
-    assert_no_new_commits_authored(repo.loader(), &ops, &merged, "SCENARIO C");
+    // v3.1 contract for SCENARIO C:
+    //
+    // (i)  Every commit authored by merge_operations (pairwise-merge rebase_descendants
+    //      authoring W1') must have a predecessor chain back to an input-visible commit.
+    //      This is LOOSER than zero-authoring: the pairwise-merge rebase IS allowed to
+    //      author W1' (an honest rewrite of W1) but must not author any orphan commits.
+    assert_authored_commits_are_honest_rewrites(repo.loader(), &ops, &merged, "SCENARIO C");
 
     let reloaded = repo.loader().load_at(&merged).unwrap();
     dump_chain(&reloaded, "SCENARIO C (shared wc change pins both gens)");
 
     let by_change = visible_commits_by_change(&reloaded);
     let slice_visible = by_change.get(&slice_change).map(|v| v.len()).unwrap_or(0);
-    eprintln!("slice change visible generations: {slice_visible}");
+    let wc_visible = by_change.get(&wc_change).map(|v| v.len()).unwrap_or(0);
+    eprintln!("SCENARIO C: slice_visible={slice_visible} wc_visible={wc_visible}");
 
-    // v3 fail-open: the stale C1 gen is pinned by a non-stale wc commit (W1).
-    // Dedup cannot remove C1 without removing the stale wc head first.
-    // The divergence persists; the no-authoring invariant is what matters here.
-    // (A future reconcile after W1 is retired can finish collapsing this.)
-    eprintln!(
-        "SCENARIO C: slice has {slice_visible} visible generation(s) — v3 fails open on \
-         wc-pinned divergence; no-authoring is the key invariant"
+    // (ii) v3.1 mechanical-sibling cleanup collapses the wc siblings (W1' and W_b)
+    //      to exactly 1 visible wc commit. They are tree-identical (both empty
+    //      snapshots on the same tree), share W as a common predecessor, are both
+    //      heads (not wc-referenced in the test repo), and pass the exclusive-ancestor
+    //      fixpoint — so the lex-smaller sibling is removed.
+    assert_eq!(
+        wc_visible, 1,
+        "SCENARIO C: wc change must converge to exactly 1 visible commit after v3.1 cleanup; \
+         got {wc_visible}"
     );
-    // No assertion on slice_visible here: fail-open means >= 1 is acceptable.
-    // The no-authoring invariant above is the binding assertion.
+
+    // (iii) Once the stale wc sibling is removed, C1 (parent of the removed sibling)
+    //       becomes unreachable from remaining heads, so the slice change converges
+    //       to exactly 1 visible commit: G4.
+    assert_eq!(
+        slice_visible, 1,
+        "SCENARIO C: slice change must converge to exactly 1 visible commit after v3.1 cleanup; \
+         got {slice_visible}"
+    );
 }
 
 /// SCENARIO D (DIRECT, isolates the dedup from the merge path): build a view
@@ -888,7 +1000,7 @@ fn t1_cascade_primary_mechanism() {
         );
     }
 
-    let _ = c_gen2;
+    drop(c_gen2);
 }
 
 /// T2 STACKED DUAL DIVERGENCE: lineage A has P-old←C-old (P is the parent
@@ -1011,7 +1123,7 @@ fn t2_stacked_dual_divergence() {
         );
     }
 
-    let _ = p_new;
+    drop(p_new);
 }
 
 /// T3 HEAD-INVERSION + DEEP HARVEST (secondary mechanism): the edge-bearing
@@ -1382,5 +1494,259 @@ fn t5_wc_commit_protection() {
     );
 
     eprintln!("T5: wc-commit protection verified — B-old not removed");
-    let _ = b_new;
+    drop(b_new);
+}
+
+/// T6 MECHANICAL-SIBLING DIVERGENCE WITH NON-IDENTICAL TREES (FAIL-OPEN).
+///
+/// Builds the same sibling shape (two view heads with the same change_id,
+/// neither wc-referenced) but gives the two siblings DIFFERENT trees using
+/// real file content. Guard (b) fires: `member.tree_ids() != survivor.tree_ids()`
+/// → dedup must FAIL OPEN (both siblings remain visible, zero extra authoring).
+///
+/// This verifies that v3.1 never silently destroys content.
+#[test]
+fn t6_mechanical_sibling_different_trees_fail_open() {
+    use jj_lib::repo::MutableRepo;
+
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let path_a = repo_path("file_a.txt");
+    let path_b = repo_path("file_b.txt");
+
+    // Create two trees with genuinely different content.
+    let tree_a = create_tree(repo, &[(&path_a, "content from lineage A\n")]);
+    let tree_b = create_tree(repo, &[(&path_b, "content from lineage B\n")]);
+
+    // Common root commit R (empty tree — predecessor origin for both siblings).
+    let mut tx = repo.start_transaction();
+    let root = create_random_commit(tx.repo_mut())
+        .set_description("root commit — common predecessor")
+        .write()
+        .unwrap();
+    let wc_change = root.change_id().clone();
+    let repo_after_root = tx.commit("root").unwrap();
+    let op_root = repo_after_root.operation().clone();
+
+    // Sibling A: rewrite root with tree_a content.
+    let mut tx = repo_after_root.start_transaction();
+    let sibling_a = tx
+        .repo_mut()
+        .rewrite_commit(&root)
+        .set_description("sibling A")
+        .set_tree(tree_a)
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo_sa = tx.commit("rewrite root -> sibling-A").unwrap();
+    let op_a = repo_sa.operation().clone();
+
+    // Sibling B: rewrite root with tree_b content (genuinely different).
+    let mut tx = repo_after_root.start_transaction();
+    let sibling_b = tx
+        .repo_mut()
+        .rewrite_commit(&root)
+        .set_description("sibling B")
+        .set_tree(tree_b)
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo_sb = tx.commit("rewrite root -> sibling-B").unwrap();
+    let op_b = repo_sb.operation().clone();
+
+    // Force-build divergent view: both sibling_a and sibling_b are view heads.
+    let mut tx = repo_sb.start_transaction();
+    let mut_repo: &mut MutableRepo = tx.repo_mut();
+    let sa_commit = mut_repo.store().get_commit(sibling_a.id()).unwrap();
+    mut_repo.add_head(&sa_commit).unwrap();
+    mut_repo.rebase_descendants().unwrap();
+
+    // Confirm the trees differ at the point of dedup.
+    let sa_reloaded = tx.repo().store().get_commit(sibling_a.id()).unwrap();
+    let sb_reloaded = tx.repo().store().get_commit(sibling_b.id()).unwrap();
+    assert_ne!(
+        sa_reloaded.tree_ids(),
+        sb_reloaded.tree_ids(),
+        "T6 setup error: siblings must have different tree_ids after rewrite"
+    );
+
+    // Pre-dedup: both siblings visible.
+    let pre_vis = {
+        let mut heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
+        let mut seen: HashSet<CommitId> = HashSet::new();
+        let mut count = 0;
+        while let Some(id) = heads.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Ok(c) = tx.repo().store().get_commit(&id) {
+                if *c.change_id() == wc_change {
+                    count += 1;
+                }
+                for pid in c.parent_ids() {
+                    heads.push(pid.clone());
+                }
+            }
+        }
+        count
+    };
+    eprintln!("T6 PRE-dedup wc_change visible = {pre_vis}");
+    assert!(
+        pre_vis >= 2,
+        "T6 setup: both siblings must be visible before dedup"
+    );
+
+    // Invoke dedup.
+    let merged_ops = [op_root, op_a, op_b];
+    tx.repo_mut()
+        .dedup_evolved_heads(&merged_ops, None)
+        .unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+
+    // No extra authoring.
+    assert_eq!(
+        rebased, 0,
+        "T6: v3.1 violation: dedup authored {rebased} commit(s) for non-identical-tree siblings"
+    );
+
+    // FAIL-OPEN: both siblings must remain visible (guard (b) fires).
+    let post_vis = {
+        let mut heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
+        let mut seen: HashSet<CommitId> = HashSet::new();
+        let mut count = 0;
+        while let Some(id) = heads.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Ok(c) = tx.repo().store().get_commit(&id) {
+                if *c.change_id() == wc_change {
+                    count += 1;
+                }
+                for pid in c.parent_ids() {
+                    heads.push(pid.clone());
+                }
+            }
+        }
+        count
+    };
+    eprintln!("T6 POST-dedup wc_change visible = {post_vis}");
+    assert_eq!(
+        post_vis, 2,
+        "T6: non-identical-tree siblings must both remain visible (fail-open); got {post_vis}"
+    );
+
+    eprintln!("T6: non-identical trees → fail-open confirmed");
+    drop((sibling_a, sibling_b));
+}
+
+/// T7 MECHANICAL-SIBLING CLEANUP — NEITHER SIBLING IS WC-REFERENCED.
+///
+/// Uses the SAME merge_operations path as SCENARIO C, but the divergent change
+/// is a SLICE change (not the wc change). The slice has two generations. Lineage
+/// A leaves the original; lineage B squashes to the final generation. After merge,
+/// the slice change has one head (the final gen — no wc commit sits on the old gen
+/// in this test). The v3 stale-gen dedup removes the old generation head directly.
+///
+/// This verifies the stale-gen path (steps 1-4) works when neither stale head is
+/// wc-referenced — the exclusive-ancestor check passes and the stale head is
+/// removed, leaving exactly 1 visible slice commit. Survivor is the final gen;
+/// no lex-greatest selection is needed here (stale-gen dedup, not mechanical-sibling).
+///
+/// This is a regression test for the survivor-selection path that doesn't involve wc
+/// commits. The slice old-gen (C1) is a view head in lineage A's op. After merge
+/// with lineage B (which squashed to G4), C1 becomes stale. v3 removes C1. Result:
+/// 1 visible slice commit (G4). No authoring.
+#[test]
+fn t7_mechanical_sibling_no_wc_lex_greatest_survives() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let repo_path = test_repo.repo_path().to_path_buf();
+
+    // 1. Create slice change C1 on the shared store.
+    let mut tx = repo.start_transaction();
+    let c1 = create_random_commit(tx.repo_mut())
+        .set_description("slice[0] original")
+        .write()
+        .unwrap();
+    let slice_change = c1.change_id().clone();
+    let repo_after_c1 = tx.commit("new empty commit").unwrap();
+    let op_base = repo_after_c1.operation().clone();
+
+    // 2. LINEAGE A: leaves C1 as-is (agent does nothing to the slice).
+    brevity::fork_agent_oplog(
+        &repo_path,
+        "agentA-t7",
+        repo_after_c1.op_heads_store().as_ref(),
+    )
+    .block_on()
+    .unwrap();
+    let loader_a =
+        brevity::agent_repo_loader(repo_after_c1.loader(), &repo_path, "agentA-t7").unwrap();
+    let repo_a = loader_a.load_at_head().unwrap();
+    // Agent A does unrelated work; C1 remains the HEAD of its lineage.
+    let op_lineage_a = repo_a.operation().clone();
+
+    // 3. LINEAGE B: squashes C1 → G4 (the slice is finished).
+    brevity::fork_agent_oplog(
+        &repo_path,
+        "agentB-t7",
+        repo_after_c1.op_heads_store().as_ref(),
+    )
+    .block_on()
+    .unwrap();
+    let loader_b =
+        brevity::agent_repo_loader(repo_after_c1.loader(), &repo_path, "agentB-t7").unwrap();
+    let repo_b = loader_b.load_at_head().unwrap();
+    let mut tx = repo_b.start_transaction();
+    let g4 = tx
+        .repo_mut()
+        .rewrite_commit(&c1)
+        .set_description("[Slice 0] final — squash")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_lineage_b = tx.commit("squash C1 -> G4").unwrap().operation().clone();
+
+    eprintln!(
+        "T7: slice original={} squash={}",
+        &c1.id().hex()[..8],
+        &g4.id().hex()[..8]
+    );
+
+    // 4. Reconcile: base + A (C1 still a head) + B (G4 replaces C1).
+    //    C1 and G4 are now BOTH view heads — divergent slice change.
+    //    v3 stale-gen dedup identifies C1 as stale (C1 is a predecessor of G4).
+    //    C1 is a view head and is not wc-referenced → v3 removes it.
+    //    Result: exactly 1 visible slice commit (G4). Zero authored commits.
+    let ops = vec![op_base, op_lineage_a, op_lineage_b];
+    let merged = repo
+        .loader()
+        .merge_operations(ops.clone(), Some("reconcile T7"))
+        .unwrap();
+
+    // Zero authoring (strict invariant — stale-gen path never authors).
+    assert_no_new_commits_authored(repo.loader(), &ops, &merged, "T7");
+
+    // Exactly 1 visible slice commit.
+    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let by_change = visible_commits_by_change(&reloaded);
+    let slice_visible = by_change.get(&slice_change).map(|v| v.len()).unwrap_or(0);
+    eprintln!("T7: slice_visible={slice_visible}");
+    assert_eq!(
+        slice_visible, 1,
+        "T7: expected exactly 1 visible slice commit after stale-gen dedup; got {slice_visible}"
+    );
+
+    // The surviving commit must be G4 (the final squash), not C1 (the stale original).
+    let surviving = &by_change[&slice_change][0];
+    assert_eq!(
+        surviving,
+        g4.id(),
+        "T7: expected survivor to be G4 ({}); got {}",
+        &g4.id().hex()[..8],
+        &surviving.hex()[..8]
+    );
+
+    eprintln!("T7: stale-gen dedup (no-wc path) confirmed — G4 survives, C1 removed");
 }

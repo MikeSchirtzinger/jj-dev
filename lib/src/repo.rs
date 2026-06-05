@@ -2521,22 +2521,52 @@ impl MutableRepo {
             let mut failed: HashSet<CommitId> = HashSet::new();
             for candidate in &heads_to_remove {
                 // Compute exclusive ancestors of candidate (commits reachable from
-                // candidate but NOT from any remaining head).
-                let exclusive: Vec<CommitId> =
-                    match revset::walk_revs(self, slice::from_ref(candidate), &remaining_heads)
-                        .map_err(|e| e.into_backend_error())
-                    {
-                        Ok(revset) => revset.iter().filter_map(|r| r.ok()).collect(),
-                        Err(e) => return Err(e),
-                    };
+                // candidate but NOT from any remaining head). Any failure here —
+                // the revset evaluation OR any single item — drops the candidate
+                // (fail-open): an under-enumerated exclusive set could wrongly
+                // approve a removal, and a hard error must never fail the
+                // reconcile itself.
+                let mut exclusive: Vec<CommitId> = Vec::new();
+                let mut walk_failed = false;
+                match revset::walk_revs(self, slice::from_ref(candidate), &remaining_heads) {
+                    Ok(revset) => {
+                        for item in revset.iter() {
+                            match item {
+                                Ok(id) => exclusive.push(id),
+                                Err(_) => {
+                                    walk_failed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => walk_failed = true,
+                }
+                if walk_failed {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] exclusive-ancestor walk failed for {} — \
+                             fail-open, dropping candidate",
+                            &candidate.hex()[..8]
+                        ));
+                    }
+                    failed.insert(candidate.clone());
+                    continue;
+                }
 
-                // Every exclusive ancestor must itself be in the stale set.
-                let pinned = exclusive.iter().any(|id| !all_stale.contains(id));
+                // Every exclusive ancestor must itself be in the stale set, and a
+                // removal may never hide ANY workspace's current wc commit — even
+                // a stale one — or the workspace is left on a hidden commit
+                // (orphaned-WC-op poison). The candidate's own wc check above
+                // covers the head; this covers buried wc commits in the stack.
+                let pinned = exclusive
+                    .iter()
+                    .any(|id| !all_stale.contains(id) || wc_ids.contains(id));
                 if pinned {
                     if let Some(log) = debug_log {
                         log(&format!(
                             "[dedup_evolved_heads] pinned stale generation {} by non-stale \
-                             descendant — fail-open",
+                             or wc-commit descendant — fail-open",
                             &candidate.hex()[..8]
                         ));
                     }
@@ -2563,6 +2593,251 @@ impl MutableRepo {
                 ));
             }
             self.remove_head(head_id);
+        }
+
+        // 5. MECHANICAL-SIBLING CLEANUP
+        //
+        //    After the predecessor-based stale-gen pass above, some divergent groups
+        //    may remain with >1 visible commit because their members are SIBLINGS —
+        //    they share a common evolution origin but have no predecessor edge between
+        //    them. This happens when pairwise-merge rebase_descendants authors a new
+        //    wc commit on top of the surviving slice generation (see SCENARIO C): the
+        //    original wc W1 (from lineage A) and the rebased wc W1' (from the merge
+        //    step) are sibling rewrites of the same change.
+        //
+        //    Guards before removing a mechanical sibling h in favour of survivor S:
+        //      (a) h is a view head AND not wc-referenced in the merged view
+        //      (b) h.tree_ids() == S.tree_ids()  — tree-identical: provably zero
+        //          content loss; non-identical siblings are HONEST divergence → fail open
+        //      (c) at least one member of the sibling group was authored by THIS merge
+        //          process — i.e., its id appears as a key in `self.commit_predecessors`
+        //          (the in-flight rewrite map that has not yet been committed to disk).
+        //          This is the definitive discriminant between mechanical siblings
+        //          (pairwise-merge rebase created one of them) and genuine concurrent
+        //          divergence (two independent agents both rewrote the same commit;
+        //          neither rewrite appears in the merge's own commit_predecessors).
+        //      (d) passes the same exclusive-ancestor validation as stale-gen removals,
+        //          evaluated against (all_stale ∪ already-approved mechanical siblings)
+        //
+        //    Survivor selection: wc-referenced member wins; if none, pick
+        //    lexicographically greatest commit id (stable across concurrent reconciles,
+        //    never uses timestamps which can vary per clock).
+
+        // Re-collect the current head set after step 4 removals.
+        let post_step4_heads: Vec<CommitId> = self.view().heads().iter().cloned().collect();
+
+        // Re-compute the change-id index over the updated head set.
+        let remaining_divergent: Vec<Vec<CommitId>> = {
+            let mut groups: Vec<Vec<CommitId>> = Vec::new();
+            // Re-collect candidate changes from the new heads.
+            let mut candidate_changes_2: HashSet<ChangeId> = HashSet::new();
+            for head_id in &post_step4_heads {
+                if let Ok(head) = self.store().get_commit(head_id) {
+                    candidate_changes_2.insert(head.change_id().clone());
+                    for parent_id in head.parent_ids() {
+                        if let Ok(parent) = self.store().get_commit(parent_id) {
+                            candidate_changes_2.insert(parent.change_id().clone());
+                        }
+                    }
+                }
+            }
+            let mut heads_iter_2 = post_step4_heads.iter();
+            let cid_index_2 = self.index.change_id_index(&mut heads_iter_2);
+            for change in &candidate_changes_2 {
+                let prefix = HexPrefix::from_id(change);
+                if let Ok(PrefixResolution::SingleMatch(targets)) =
+                    cid_index_2.resolve_prefix(&prefix)
+                    && let Some(visible) = targets.into_visible()
+                    && visible.len() >= 2
+                {
+                    groups.push(visible);
+                }
+            }
+            groups
+        };
+
+        if remaining_divergent.is_empty() {
+            return Ok(());
+        }
+
+        // For the exclusive-ancestor fixpoint, we need a set that includes both
+        // confirmed stale commits (from step 3) AND mechanical siblings approved
+        // in this pass. Build incrementally.
+        let mut approved_mechanical: HashSet<CommitId> = HashSet::new();
+
+        // Snapshot the set of commit ids that were authored by THIS merge process
+        // (pairwise-merge rebase_descendants writes these into commit_predecessors
+        // before dedup runs). This is the authoritative discriminant for guard (c):
+        // a mechanical sibling has its id here; a genuine concurrent rewrite does not.
+        let merge_authored_ids: HashSet<CommitId> =
+            self.commit_predecessors.keys().cloned().collect();
+
+        for group in &remaining_divergent {
+            // Guard (c) requires at least one group member to be merge-authored.
+            // A group where NO member is merge-authored is genuine concurrent
+            // divergence — do not touch it.
+            let any_merge_authored = group.iter().any(|id| merge_authored_ids.contains(id));
+            if !any_merge_authored {
+                if let Some(log) = debug_log {
+                    log(&format!(
+                        "[dedup_evolved_heads] mechanical-sibling group for change {:?} has no \
+                         merge-authored member — genuine concurrent divergence, skipping",
+                        group
+                            .first()
+                            .and_then(|id| self.store().get_commit(id).ok())
+                            .map(|c| c.change_id().reverse_hex()
+                                [..12.min(c.change_id().reverse_hex().len())]
+                                .to_string())
+                            .unwrap_or_default()
+                    ));
+                }
+                continue;
+            }
+
+            // Pick the survivor: wc-referenced first; otherwise lexicographically
+            // greatest commit id (stable, deterministic).
+            let survivor_id = group
+                .iter()
+                .find(|id| wc_ids.contains(*id))
+                .or_else(|| group.iter().max_by(|a, b| a.hex().cmp(&b.hex())))
+                .cloned();
+            let Some(survivor_id) = survivor_id else {
+                continue;
+            };
+
+            let survivor = match self.store().get_commit(&survivor_id) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Determine candidates for removal (non-survivor members).
+            let mut sibling_removals: HashSet<CommitId> = HashSet::new();
+
+            for member_id in group {
+                if member_id == &survivor_id {
+                    continue;
+                }
+
+                // (a) must be a view head and not wc-referenced.
+                if !post_step4_heads.contains(member_id) || wc_ids.contains(member_id) {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] mechanical sibling {} not a head or is \
+                             wc-referenced — fail-open",
+                            &member_id.hex()[..8]
+                        ));
+                    }
+                    continue;
+                }
+
+                let member = match self.store().get_commit(member_id) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // (b) tree-identical to survivor.
+                if member.tree_ids() != survivor.tree_ids() {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] sibling group for change {} not \
+                             tree-identical ({} vs {}) — fail-open (honest divergence)",
+                            &member.change_id().reverse_hex()
+                                [..12.min(member.change_id().reverse_hex().len())],
+                            &member_id.hex()[..8],
+                            &survivor_id.hex()[..8]
+                        ));
+                    }
+                    continue;
+                }
+
+                sibling_removals.insert(member_id.clone());
+            }
+
+            if sibling_removals.is_empty() {
+                continue;
+            }
+
+            // (d) Exclusive-ancestor validation: same fixpoint as step 3.
+            //     Approved set = all_stale ∪ approved_mechanical ∪ current candidates.
+            let extended_approved: HashSet<CommitId> = all_stale
+                .iter()
+                .chain(approved_mechanical.iter())
+                .chain(sibling_removals.iter())
+                .cloned()
+                .collect();
+
+            // Build the remaining-heads set after removing sibling_removals.
+            let remaining_after_siblings: Vec<CommitId> = post_step4_heads
+                .iter()
+                .filter(|h| !sibling_removals.contains(*h))
+                .cloned()
+                .collect();
+
+            let mut failed_siblings: HashSet<CommitId> = HashSet::new();
+            // Single-pass: the sibling candidates are independent heads (they are
+            // siblings of the same change, each with their own stack). The
+            // extended_approved set already includes all of them, so one pass suffices.
+            for candidate in &sibling_removals {
+                let mut exclusive: Vec<CommitId> = Vec::new();
+                let mut walk_failed = false;
+                match revset::walk_revs(self, slice::from_ref(candidate), &remaining_after_siblings)
+                {
+                    Ok(revset) => {
+                        for item in revset.iter() {
+                            match item {
+                                Ok(id) => exclusive.push(id),
+                                Err(_) => {
+                                    walk_failed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => walk_failed = true,
+                }
+                if walk_failed {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] exclusive-ancestor walk failed for \
+                             mechanical sibling {} — fail-open",
+                            &candidate.hex()[..8]
+                        ));
+                    }
+                    failed_siblings.insert(candidate.clone());
+                    continue;
+                }
+                let pinned = exclusive
+                    .iter()
+                    .any(|id| !extended_approved.contains(id) || wc_ids.contains(id));
+                if pinned {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] mechanical sibling {} pinned by \
+                             non-approved or wc-commit ancestor — fail-open",
+                            &candidate.hex()[..8]
+                        ));
+                    }
+                    failed_siblings.insert(candidate.clone());
+                }
+            }
+
+            for failed in failed_siblings {
+                sibling_removals.remove(&failed);
+            }
+
+            // Apply the validated mechanical-sibling removals.
+            for removal_id in &sibling_removals {
+                if let Some(log) = debug_log {
+                    log(&format!(
+                        "[dedup_evolved_heads] removing mechanical sibling {} (tree-identical \
+                         to survivor {})",
+                        &removal_id.hex()[..8],
+                        &survivor_id.hex()[..8]
+                    ));
+                }
+                self.remove_head(removal_id);
+                approved_mechanical.insert(removal_id.clone());
+            }
         }
 
         Ok(())
