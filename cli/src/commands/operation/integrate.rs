@@ -17,7 +17,6 @@ use jj_lib::operation::Operation;
 use pollster::FutureExt as _;
 
 use crate::cli_util::CommandHelper;
-use crate::cli_util::start_repo_transaction;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
 
@@ -58,29 +57,14 @@ pub fn cmd_op_integrate(
         repo_loader.op_heads_store().as_ref(),
         repo_loader.op_store(),
         |op_heads| -> Result<Operation, CommandError> {
-            let base_repo = repo_loader.load_at(&op_heads[0])?;
-            // TODO: It may be helpful to print each operation we're merging here
-            let mut tx = start_repo_transaction(&base_repo, command.string_args());
-            for other_op_head in op_heads.into_iter().skip(1) {
-                tx.merge_operation(other_op_head)?;
-                let num_rebased = tx.repo_mut().rebase_descendants()?;
-                if num_rebased > 0 {
-                    writeln!(
-                        ui.status(),
-                        "Rebased {num_rebased} descendant commits onto commits rewritten by other \
-                         operation"
-                    )?;
-                }
-            }
             writeln!(
                 ui.status(),
                 "The specified operation has been integrated with other existing operations."
             )?;
-            Ok(tx
-                .write("reconcile divergent operations")?
-                .leave_unpublished()
-                .operation()
-                .clone())
+            // Route through RepoLoader::merge_operations so the op-merge dedup
+            // pass and JJ_DEBUG_MERGE instrumentation cover this repair path
+            // too (same rationale as resolve_operation in cli_util.rs).
+            Ok(repo_loader.merge_operations(op_heads, Some("reconcile divergent operations"))?)
         },
     )?;
 

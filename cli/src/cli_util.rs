@@ -694,25 +694,14 @@ impl CommandHelper {
                         ui.status(),
                         "Concurrent modification detected, resolving automatically.",
                     )?;
-                    let base_repo = repo_loader.load_at(&op_heads[0])?;
-                    // TODO: It may be helpful to print each operation we're merging here
-                    let mut tx = start_repo_transaction(&base_repo, &self.data.string_args);
-                    for other_op_head in op_heads.into_iter().skip(1) {
-                        tx.merge_operation(other_op_head)?;
-                        let num_rebased = tx.repo_mut().rebase_descendants()?;
-                        if num_rebased > 0 {
-                            writeln!(
-                                ui.status(),
-                                "Rebased {num_rebased} descendant commits onto commits rewritten \
-                                 by other operation"
-                            )?;
-                        }
-                    }
-                    Ok(tx
-                        .write("reconcile divergent operations")?
-                        .leave_unpublished()
-                        .operation()
-                        .clone())
+                    // Route through RepoLoader::merge_operations so the op-merge
+                    // dedup pass (dedup_evolved_heads) and the JJ_DEBUG_MERGE
+                    // instrumentation run on the LIVE CLI reconcile path. The
+                    // previous inline pairwise merge loop here bypassed both:
+                    // divergence-minting descendant rebases went unobserved and
+                    // resurrected stale generations were never deduped.
+                    Ok(repo_loader
+                        .merge_operations(op_heads, Some("reconcile divergent operations"))?)
                 },
             )
         }

@@ -87,7 +87,6 @@ fn test_concurrent_operations_auto_rebase() {
     [EOF]
     ------- stderr -------
     Concurrent modification detected, resolving automatically.
-    Rebased 1 descendant commits onto commits rewritten by other operation
     [EOF]
     ");
 }

@@ -736,7 +736,6 @@ fn test_workspaces_conflicting_edits() {
     insta::assert_snapshot!(output, @r"
     ------- stderr -------
     Concurrent modification detected, resolving automatically.
-    Rebased 1 descendant commits onto commits rewritten by other operation
     Working copy  (@) now at: pmmvwywv/2 90f3d42e (divergent) (empty) (no description set)
     Parent commit (@-)      : qpvuntsm b853f7c8 (no description set)
     Added 0 files, modified 1 files, removed 0 files
