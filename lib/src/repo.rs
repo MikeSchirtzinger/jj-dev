@@ -860,6 +860,7 @@ impl RepoLoader {
         operations: Vec<Operation>,
         tx_description: Option<&str>,
     ) -> Result<Operation, RepoLoaderError> {
+        use crate::object_id::ObjectId as _;
         let num_operations = operations.len();
         let mut operations = operations.into_iter();
         let Some(base_op) = operations.next() else {
@@ -870,6 +871,20 @@ impl RepoLoader {
             // (commit-predecessor) records for the post-merge dedup pass below.
             let all_ops: Vec<Operation> =
                 std::iter::once(base_op.clone()).chain(operations).collect();
+
+            // Build a debug-logger for JJ_DEBUG_MERGE (dual-mode: file path or stderr).
+            let debug_log = make_debug_log();
+            if let Some(ref log) = debug_log {
+                log(&format!(
+                    "[merge_operations] merging {} ops; base op={}",
+                    all_ops.len(),
+                    all_ops[0].id().hex(),
+                ));
+                for op in &all_ops {
+                    log(&format!("  merged op id={}", op.id().hex()));
+                }
+            }
+
             let base_repo = self.load_at(&base_op)?;
             let mut tx = base_repo.start_transaction();
             for other_op in all_ops.iter().skip(1).cloned() {
@@ -881,8 +896,71 @@ impl RepoLoader {
             // its newer generation is already a head can be left visible as a
             // separate head -> spurious divergence. Hide such evolution-ancestor
             // heads in a single dedup pass driven by stored predecessor records.
-            tx.repo_mut().dedup_evolved_heads(&all_ops)?;
-            tx.repo_mut().rebase_descendants()?;
+            //
+            // v3 invariant: reconcile NEVER authors commits. Dedup operates
+            // exclusively by removing stale view heads. The subsequent
+            // rebase_descendants is a no-op unless some other code path added
+            // rewrites; we log loudly if it does anything.
+            tx.repo_mut()
+                .dedup_evolved_heads(&all_ops, debug_log.as_deref())?;
+            let rebased = tx.repo_mut().rebase_descendants()?;
+            if rebased > 0
+                && let Some(ref log) = debug_log
+            {
+                log(&format!(
+                    "[merge_operations] WARNING: rebase_descendants after dedup authored \
+                     {rebased} new commit(s) — invariant violation, some path added rewrites"
+                ));
+            }
+
+            // Residual tripwire: after dedup, any change id still resolving to >1
+            // visible commit is a mechanism we haven't modelled.
+            if let Some(ref log) = debug_log {
+                // Collect head ids and walk visible commits first (no index borrow).
+                let post_heads: Vec<CommitId> =
+                    tx.repo_mut().view().heads().iter().cloned().collect();
+                let store = tx.repo_mut().store().clone();
+                let mut seen_changes: HashSet<ChangeId> = HashSet::new();
+                {
+                    let mut stack = post_heads.clone();
+                    let mut visited: HashSet<CommitId> = HashSet::new();
+                    while let Some(cid) = stack.pop() {
+                        if !visited.insert(cid.clone()) {
+                            continue;
+                        }
+                        if let Ok(commit) = store.get_commit(&cid) {
+                            seen_changes.insert(commit.change_id().clone());
+                            for pid in commit.parent_ids() {
+                                stack.push(pid.clone());
+                            }
+                        }
+                    }
+                }
+                // Build the change-id index via MutableIndex (separate borrow scope).
+                {
+                    let mut post_heads_iter = post_heads.iter();
+                    let change_id_index = tx
+                        .repo_mut()
+                        .mutable_index()
+                        .change_id_index(&mut post_heads_iter);
+                    for change in seen_changes {
+                        let prefix = HexPrefix::from_id(&change);
+                        if let Ok(PrefixResolution::SingleMatch(targets)) =
+                            change_id_index.resolve_prefix(&prefix)
+                            && let Some(visible) = targets.into_visible()
+                            && visible.len() >= 2
+                        {
+                            log(&format!(
+                                "[dedup_evolved_heads] RESIDUAL divergence after dedup: \
+                                 change {} ({} visible)",
+                                &change.reverse_hex()[..12.min(change.reverse_hex().len())],
+                                visible.len()
+                            ));
+                        }
+                    }
+                }
+            }
+
             let tx_description = tx_description.map_or_else(
                 || format!("merge {num_operations} operations"),
                 |tx_description| tx_description.to_string(),
@@ -939,6 +1017,90 @@ impl Rewrite {
             Self::Abandoned(new_parent_ids) => new_parent_ids.as_slice(),
         }
     }
+}
+
+/// Boxed logging closure type, dual-mode: file-append or stderr.
+type DebugLog = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Build a debug-logging closure for JJ_DEBUG_MERGE.
+///
+/// If the env var is set to a path starting with '/', appends each line to
+/// that file (with timestamp + pid prefix) so output survives even when the
+/// caller has redirected stderr. Any other non-empty value logs to stderr.
+/// File-write failures are silently ignored so debug never fails a merge.
+/// Returns `None` if JJ_DEBUG_MERGE is unset.
+fn make_debug_log() -> Option<DebugLog> {
+    let val = std::env::var("JJ_DEBUG_MERGE").ok()?;
+    if val.is_empty() {
+        return None;
+    }
+    if val.starts_with('/') {
+        let path = val.clone();
+        let pid = std::process::id();
+        Some(Box::new(move |msg: &str| {
+            use std::io::Write as _;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let line = format!("[{now}][pid={pid}] {msg}\n");
+            // Append mode; silently ignore failures.
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                drop(f.write_all(line.as_bytes()));
+            }
+        }))
+    } else {
+        Some(Box::new(|msg: &str| {
+            eprintln!("{msg}");
+        }))
+    }
+}
+
+/// Result type for `harvest_predecessor_edges`.
+enum HarvestResult {
+    Edges(HashMap<CommitId, Vec<CommitId>>),
+    CapExceeded,
+}
+
+/// Harvest direct predecessor edges (new_commit → [old_commits]) from the op
+/// DAG. If `stop_at` is `Some(id)`, the op with that id and all ops below it
+/// are excluded (CCA-bounded harvest). Returns `CapExceeded` if `max_ops` is
+/// reached so the caller can fail open.
+fn harvest_predecessor_edges(
+    merged_ops: &[Operation],
+    stop_at: Option<&OperationId>,
+    max_ops: usize,
+) -> BackendResult<HarvestResult> {
+    let mut preds: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
+    let mut seen_ops: HashSet<OperationId> = HashSet::new();
+    let mut op_stack: Vec<Operation> = merged_ops.to_vec();
+    while let Some(op) = op_stack.pop() {
+        if stop_at.is_some() && Some(op.id()) == stop_at {
+            continue;
+        }
+        if !seen_ops.insert(op.id().clone()) {
+            continue;
+        }
+        if seen_ops.len() > max_ops {
+            return Ok(HarvestResult::CapExceeded);
+        }
+        if let Some(map) = &op.store_operation().commit_predecessors {
+            for (new_id, old_ids) in map {
+                preds
+                    .entry(new_id.clone())
+                    .or_default()
+                    .extend(old_ids.iter().cloned());
+            }
+        }
+        for parent in op.parents() {
+            op_stack.push(parent.map_err(|err| BackendError::Other(err.into()))?);
+        }
+    }
+    Ok(HarvestResult::Edges(preds))
 }
 
 /// Returns true if `ancestor` is a transitive predecessor (older evolution
@@ -2008,18 +2170,30 @@ impl MutableRepo {
         Ok(())
     }
 
-    /// Reconcile-time dedup: when multiple visible heads share a change id and
+    /// Reconcile-time dedup: when multiple visible commits share a change id and
     /// one is an *evolution ancestor* (transitive predecessor) of another, hide
-    /// the older generation.
+    /// the older generation by removing it from the view heads.
     ///
-    /// This repairs the case where pairwise op-head merging cleared the rewrite
-    /// map before an older generation of a change was merged in, leaving the old
-    /// and new generations both visible as heads (spurious divergence). The
-    /// predecessor relationship is recovered from the `commit_predecessors`
-    /// records stored on the operations being merged (and their ancestry).
-    pub fn dedup_evolved_heads(&mut self, merged_ops: &[Operation]) -> BackendResult<()> {
+    /// # v3 invariant: reconcile NEVER authors commits
+    ///
+    /// All hiding is done purely via `remove_head` on the view. We NEVER call
+    /// `set_rewritten_commit` here, so the subsequent `rebase_descendants` is
+    /// always a no-op for dedup-sourced removals.
+    ///
+    /// This repairs two distinct failure classes:
+    ///   - PRIMARY: rebase-minted sibling divergence (v2 called set_rewritten_commit
+    ///     → rebase_descendants minted new commits which became siblings).
+    ///   - SECONDARY: head-inversion where the edge-bearing op sat at/below the CCA
+    ///     and was excluded from the phase-1 harvest.
+    ///
+    /// For stale commits pinned by a non-stale visible descendant (including wc
+    /// commits), we fail open — dedup is idempotent, a later reconcile finishes.
+    pub fn dedup_evolved_heads(
+        &mut self,
+        merged_ops: &[Operation],
+        debug_log: Option<&(dyn Fn(&str) + Send + Sync)>,
+    ) -> BackendResult<()> {
         use crate::object_id::ObjectId as _;
-        let dbg = std::env::var("JJ_DEBUG_MERGE").is_ok();
 
         // 0. Cheap pre-check + CANDIDATE SELECTION.
         //
@@ -2075,13 +2249,30 @@ impl MutableRepo {
             return Ok(());
         }
 
-        // 1. Bound the predecessor harvest to the MERGE CONE: operations since
-        //    the merged heads' closest common ancestor. Spurious divergence can
-        //    only be minted by rewrites recorded in the lineages being merged —
-        //    edges older than the common ancestor were already reconciled into
-        //    every side's base view. The bound also means pre-existing
-        //    (user-level) divergence is never retro-rewritten, and reconcile
-        //    cost stays proportional to the merge, not to total repo history.
+        if let Some(log) = debug_log {
+            for group in &divergent_groups {
+                let is_head: Vec<_> = group
+                    .iter()
+                    .map(|id| {
+                        let h = head_ids.contains(id);
+                        let wc = self.view().wc_commit_ids().values().any(|w| w == id);
+                        format!("{} (head={h} wc={wc})", &id.hex()[..8])
+                    })
+                    .collect();
+                log(&format!(
+                    "[dedup_evolved_heads] divergent group: [{}]",
+                    is_head.join(", ")
+                ));
+            }
+        }
+
+        // Hard cap: a stale head file can reference an op far from the rest of
+        // the graph (orphaned-op class), making the cone arbitrarily large.
+        // Past the cap we fail open to pre-dedup behaviour rather than stall
+        // every reconcile.
+        const MAX_HARVEST_OPS: usize = 10_000;
+
+        // 1. Phase-1 harvest: bounded by the merge cone's CCA (cheap, common case).
         let mut common_ancestor: Option<Operation> = None;
         for op in merged_ops {
             common_ancestor = match common_ancestor {
@@ -2097,73 +2288,213 @@ impl MutableRepo {
         }
         let stop_at: Option<OperationId> = common_ancestor.map(|op| op.id().clone());
 
-        // Hard cap: a stale head file can reference an op far from the rest of
-        // the graph (orphaned-op class), making the cone arbitrarily large.
-        // Past the cap we fail open to pre-dedup behaviour rather than stall
-        // every reconcile.
-        const MAX_HARVEST_OPS: usize = 10_000;
-
-        // 2. Harvest direct predecessor edges (new_commit -> [old_commits])
-        //    from operations inside the cone.
-        let mut preds: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
-        let mut seen_ops: HashSet<OperationId> = HashSet::new();
-        let mut op_stack: Vec<Operation> = merged_ops.to_vec();
-        while let Some(op) = op_stack.pop() {
-            if Some(op.id()) == stop_at.as_ref() {
-                continue;
-            }
-            if !seen_ops.insert(op.id().clone()) {
-                continue;
-            }
-            if seen_ops.len() > MAX_HARVEST_OPS {
-                if dbg {
-                    eprintln!(
-                        "[dedup_evolved_heads] merge cone exceeds {MAX_HARVEST_OPS} ops — \
-                         skipping dedup (fail-open)"
-                    );
-                }
-                return Ok(());
-            }
-            if let Some(map) = &op.store_operation().commit_predecessors {
-                for (new_id, old_ids) in map {
-                    preds
-                        .entry(new_id.clone())
-                        .or_default()
-                        .extend(old_ids.iter().cloned());
-                }
-            }
-            for parent in op.parents() {
-                op_stack.push(parent.map_err(|err| BackendError::Other(err.into()))?);
-            }
-        }
-        if preds.is_empty() {
-            return Ok(());
-        }
-
-        // 3. For each divergent change, hide any visible commit (head OR
-        //    visible-but-not-head) that is a transitive evolution-predecessor of
-        //    another visible commit of the same change. `set_rewritten_commit`
-        //    plus the final `rebase_descendants` then reparents any wc-commit
-        //    child of the hidden generation onto the surviving successor — which
-        //    is exactly the right outcome.
-        for group in &divergent_groups {
-            for old in group {
-                if let Some(new) = group
-                    .iter()
-                    .find(|cand| *cand != old && is_transitive_predecessor(&preds, old, cand))
-                {
-                    if dbg {
-                        eprintln!(
-                            "[dedup_evolved_heads] hiding stale generation {} (predecessor of \
-                             visible commit {})",
-                            &old.hex()[..8],
-                            &new.hex()[..8]
-                        );
+        let phase1_preds =
+            match harvest_predecessor_edges(merged_ops, stop_at.as_ref(), MAX_HARVEST_OPS)? {
+                HarvestResult::Edges(p) => p,
+                HarvestResult::CapExceeded => {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] merge cone exceeds {MAX_HARVEST_OPS} ops — \
+                             skipping dedup (fail-open)"
+                        ));
                     }
-                    self.set_rewritten_commit(old.clone(), new.clone());
+                    return Ok(());
                 }
+            };
+
+        // 2. Attempt resolution with phase-1 edges.
+        //    A group is "resolved" if at least one member is a transitive
+        //    predecessor of another; we can identify the stale generation.
+        //    Groups unresolved by phase-1 (edge was below the CCA) get a
+        //    phase-2 unbounded retry.
+        let mut unresolved: Vec<&Vec<CommitId>> = Vec::new();
+        for group in &divergent_groups {
+            let has_predecessor = group.iter().any(|old| {
+                group
+                    .iter()
+                    .any(|new| new != old && is_transitive_predecessor(&phase1_preds, old, new))
+            });
+            if !has_predecessor {
+                unresolved.push(group);
             }
         }
+
+        // Phase-2 harvest (unbounded): for groups not resolved by the CCA-bounded pass.
+        let phase2_preds: Option<HashMap<CommitId, Vec<CommitId>>> = if unresolved.is_empty() {
+            None
+        } else {
+            if let Some(log) = debug_log {
+                log(&format!(
+                    "[dedup_evolved_heads] {} group(s) unresolved by phase-1 harvest; \
+                     triggering unbounded phase-2 harvest",
+                    unresolved.len()
+                ));
+            }
+            // Unbounded: pass stop_at=None.
+            match harvest_predecessor_edges(merged_ops, None, MAX_HARVEST_OPS)? {
+                HarvestResult::Edges(p) => Some(p),
+                HarvestResult::CapExceeded => None, // cap exceeded, fall through with phase1 only
+            }
+        };
+
+        // 3. For each divergent group, build the stale set S and validate which
+        //    members are safe to remove from the view.
+        //
+        //    # v3 invariant: reconcile NEVER authors commits
+        //
+        //    The ONLY mechanism for hiding stale generations is removing them from
+        //    `view.heads()`. A view head `h` is removable iff:
+        //      (a) it is in S (transitive evolution-predecessor of another visible
+        //          member of the same change);
+        //      (b) it is NOT any workspace's wc commit in the merged view;
+        //      (c) every commit that would become unreachable by removing `h`
+        //          (its exclusive ancestors relative to all remaining heads) is
+        //          itself in S.
+        //
+        //    We compute the FULL candidate removal set first, then validate each
+        //    candidate's exclusive-ancestor constraint against (all heads minus ALL
+        //    candidates), so removing one stale stack doesn't invalidate the check
+        //    for another. Failed candidates are dropped and the check repeats
+        //    (fixpoint over the tiny candidate set).
+        //
+        //    Commits in S that are pinned by a non-stale visible descendant (e.g.
+        //    a wc commit that has no successor) are left alone: dedup is idempotent
+        //    across cascading reconciles, so a later pass can finish the job.
+
+        let wc_ids: HashSet<CommitId> = self.view().wc_commit_ids().values().cloned().collect();
+
+        // Collect the initial set of removable head candidates across all groups.
+        let mut heads_to_remove: HashSet<CommitId> = HashSet::new();
+
+        for group in &divergent_groups {
+            // Choose the right predecessor map (phase-2 for unresolved groups).
+            let preds = match &phase2_preds {
+                Some(p2) if unresolved.contains(&group) => p2,
+                _ => &phase1_preds,
+            };
+
+            // S = members of this group that are transitive predecessors of
+            //     some other member (i.e. the stale generations).
+            let stale: Vec<CommitId> = group
+                .iter()
+                .filter(|old| {
+                    group
+                        .iter()
+                        .any(|new| new != *old && is_transitive_predecessor(preds, old, new))
+                })
+                .cloned()
+                .collect();
+
+            // Among the stale members, only those that are actual view heads can
+            // be removed via remove_head; stale non-head ancestors are hidden
+            // implicitly when their descendant head is removed.
+            let stale_heads: Vec<CommitId> = stale
+                .iter()
+                .filter(|id| head_ids.contains(id))
+                .cloned()
+                .collect();
+
+            // Collect the stale set (heads + non-heads) for the exclusive-ancestor check.
+            let stale_set: HashSet<CommitId> = stale.iter().cloned().collect();
+
+            for candidate in stale_heads {
+                // (b) wc-commit protection.
+                if wc_ids.contains(&candidate) {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] wc-commit protection: stale head {} is a \
+                             workspace wc commit — not removing",
+                            &candidate.hex()[..8]
+                        ));
+                    }
+                    continue;
+                }
+                // (c) Exclusive-ancestor check deferred to the fixpoint below;
+                //     for now add to the global candidate set.
+                // We also need the stale_set for validation below, so keep it.
+                heads_to_remove.insert(candidate);
+            }
+            drop(stale_set); // used per-group; rebuilt below in fixpoint
+        }
+
+        // Fixpoint: validate that each candidate's exclusive ancestors (relative
+        // to remaining heads) are ALL stale — if not, drop the candidate and retry.
+        //
+        // We need the full stale set (across all groups) for the exclusive-ancestor
+        // check to work correctly when candidates form stacked stacks.
+        let all_stale: HashSet<CommitId> = {
+            let mut s = HashSet::new();
+            for group in &divergent_groups {
+                let preds = match &phase2_preds {
+                    Some(p2) if unresolved.contains(&group) => p2,
+                    _ => &phase1_preds,
+                };
+                for old in group {
+                    if group
+                        .iter()
+                        .any(|new| new != old && is_transitive_predecessor(preds, old, new))
+                    {
+                        s.insert(old.clone());
+                    }
+                }
+            }
+            s
+        };
+
+        loop {
+            let remaining_heads: Vec<CommitId> = head_ids
+                .iter()
+                .filter(|h| !heads_to_remove.contains(*h))
+                .cloned()
+                .collect();
+
+            let mut failed: HashSet<CommitId> = HashSet::new();
+            for candidate in &heads_to_remove {
+                // Compute exclusive ancestors of candidate (commits reachable from
+                // candidate but NOT from any remaining head).
+                let exclusive: Vec<CommitId> =
+                    match revset::walk_revs(self, slice::from_ref(candidate), &remaining_heads)
+                        .map_err(|e| e.into_backend_error())
+                    {
+                        Ok(revset) => revset.iter().filter_map(|r| r.ok()).collect(),
+                        Err(e) => return Err(e),
+                    };
+
+                // Every exclusive ancestor must itself be in the stale set.
+                let pinned = exclusive.iter().any(|id| !all_stale.contains(id));
+                if pinned {
+                    if let Some(log) = debug_log {
+                        log(&format!(
+                            "[dedup_evolved_heads] pinned stale generation {} by non-stale \
+                             descendant — fail-open",
+                            &candidate.hex()[..8]
+                        ));
+                    }
+                    failed.insert(candidate.clone());
+                }
+            }
+
+            if failed.is_empty() {
+                break;
+            }
+            for f in failed {
+                heads_to_remove.remove(&f);
+            }
+        }
+
+        // 4. Apply: remove validated stale heads from the view.
+        //    Invariant: this records NO entries in parent_mapping, so the
+        //    subsequent rebase_descendants is a guaranteed no-op for our changes.
+        for head_id in &heads_to_remove {
+            if let Some(log) = debug_log {
+                log(&format!(
+                    "[dedup_evolved_heads] removing stale head {}",
+                    &head_id.hex()[..8]
+                ));
+            }
+            self.remove_head(head_id);
+        }
+
         Ok(())
     }
 
