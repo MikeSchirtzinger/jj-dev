@@ -2148,3 +2148,326 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
 
     eprintln!("T10: both non-empty different-tree siblings remain — fail-open confirmed");
 }
+
+/// T11 BOTH-EMPTY TWO-WRITER PAIR — NO PREDECESSOR EDGES (run-12 / delta-8 shape).
+///
+/// Models the production two-writer pattern: wave pre-create commits an empty
+/// placeholder under change id C (lineage A), loop task-describe independently
+/// rewrites the same original commit also producing an empty result (lineage B).
+/// The two results E_a and E_b share the same change_id, but neither is a
+/// transitive predecessor of the other — they only share the common predecessor R.
+///
+/// The critical v3.3 invariant tested here: `any_merge_authored` is false for both
+/// (they were NOT authored by pairwise-merge rebase, they came from two independent
+/// agent op lineages), so the v3.2 gate would fail-open. v3.3 must recognize
+/// `any_empty_non_wc` alone as sufficient to collapse to 1 visible, no authoring.
+#[test]
+fn t11_both_empty_no_predecessor_edges_two_writer() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let repo_dir = test_repo.repo_path().to_path_buf();
+
+    // 1. Create shared base commit R (empty — tree == root.tree so is_empty() = true).
+    //    Use new_commit with the root commit's tree so R has no content change.
+    //    Both agent lineages will rewrite R independently.
+    let mut tx = repo.start_transaction();
+    let root_id = repo.store().root_commit_id().clone();
+    let root_commit = repo.store().get_commit(&root_id).unwrap();
+    let r = tx
+        .repo_mut()
+        .new_commit(vec![root_id.clone()], root_commit.tree())
+        .set_description("pre-create placeholder R")
+        .write()
+        .unwrap();
+    let target_change = r.change_id().clone();
+    let repo_r = tx.commit("create R").unwrap();
+    let op_r = repo_r.operation().clone();
+
+    // 2. LINEAGE A (wave pre-create): rewrites R with same empty tree, different desc.
+    //    Produces E_a: change_id=target_change, predecessor=R, tree == root.tree → empty.
+    brevity::fork_agent_oplog(&repo_dir, "writer-a-t11", repo_r.op_heads_store().as_ref())
+        .block_on()
+        .unwrap();
+    let loader_a = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-a-t11").unwrap();
+    let repo_a = loader_a.load_at_head().unwrap();
+    let r_in_a = repo_a.store().get_commit(r.id()).unwrap();
+    let mut tx = repo_a.start_transaction();
+    let e_a = tx
+        .repo_mut()
+        .rewrite_commit(&r_in_a)
+        .set_description("slice[3] beta-placeholder")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_a = tx.commit("pre-create empty").unwrap().operation().clone();
+
+    // 3. LINEAGE B (loop task-describe): rewrites R with same empty tree, different
+    //    desc — independently, no knowledge of E_a. Produces E_b: same change_id,
+    //    predecessor=R, no predecessor edge to E_a.
+    brevity::fork_agent_oplog(&repo_dir, "writer-b-t11", repo_r.op_heads_store().as_ref())
+        .block_on()
+        .unwrap();
+    let loader_b = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-b-t11").unwrap();
+    let repo_b = loader_b.load_at_head().unwrap();
+    let r_in_b = repo_b.store().get_commit(r.id()).unwrap();
+    let mut tx = repo_b.start_transaction();
+    let e_b = tx
+        .repo_mut()
+        .rewrite_commit(&r_in_b)
+        .set_description("[Slice 3] beta-loop-describe")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_b = tx
+        .commit("loop-describe empty")
+        .unwrap()
+        .operation()
+        .clone();
+
+    // Verify both E_a and E_b are empty.
+    {
+        let check_a = loader_a.load_at(&op_a).unwrap();
+        let check_b = loader_b.load_at(&op_b).unwrap();
+        assert!(
+            check_a
+                .store()
+                .get_commit(e_a.id())
+                .unwrap()
+                .is_empty(&*check_a)
+                .unwrap_or(false),
+            "T11 setup: E_a must be empty"
+        );
+        assert!(
+            check_b
+                .store()
+                .get_commit(e_b.id())
+                .unwrap()
+                .is_empty(&*check_b)
+                .unwrap_or(false),
+            "T11 setup: E_b must be empty"
+        );
+    }
+
+    eprintln!(
+        "T11: both-empty pair E_a={} E_b={} change={}",
+        &e_a.id().hex()[..8],
+        &e_b.id().hex()[..8],
+        &target_change.reverse_hex()[..8]
+    );
+
+    // Reconcile: [op_r, op_a, op_b]. E_a and E_b are siblings of target_change.
+    // v3.3 must remove the lex-smaller and keep exactly 1 visible, no authoring.
+    let ops = vec![op_r, op_a, op_b];
+    let merged = repo
+        .loader()
+        .merge_operations(ops.clone(), Some("reconcile T11"))
+        .unwrap();
+
+    // Only honest rewrites allowed.
+    assert_authored_commits_are_honest_rewrites(repo.loader(), &ops, &merged, "T11");
+
+    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let by_change = visible_commits_by_change(&reloaded);
+    let visible = by_change.get(&target_change).map(|v| v.len()).unwrap_or(0);
+    eprintln!("T11: target_change visible={visible}");
+
+    assert_eq!(
+        visible, 1,
+        "T11: both-empty siblings must collapse to exactly 1 visible; got {visible}"
+    );
+
+    // Survivor must be the lex-greater of E_a and E_b (no wc bias here).
+    let surviving_id = &by_change[&target_change][0];
+    let expected_survivor = if e_a.id().hex() > e_b.id().hex() {
+        e_a.id()
+    } else {
+        e_b.id()
+    };
+    assert_eq!(
+        surviving_id,
+        expected_survivor,
+        "T11: lex-greater sibling must survive; expected {} got {}",
+        &expected_survivor.hex()[..8],
+        &surviving_id.hex()[..8]
+    );
+
+    eprintln!(
+        "T11: both-empty two-writer collapse confirmed — survivor {}",
+        &surviving_id.hex()[..8]
+    );
+}
+
+/// T12 BOTH-EMPTY PAIR — WC-REFERENCED MEMBER SURVIVES.
+///
+/// Same structural shape as T11 (two independent lineages both rewrite a common
+/// base R → E_a and E_b, both empty, neither a predecessor of the other).
+/// Additionally, E_b is registered as the wc commit. The wc-referenced empty
+/// sibling must survive; the non-wc empty sibling is removed. No authoring.
+#[test]
+fn t12_both_empty_wc_referenced_member_survives() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let repo_dir = test_repo.repo_path().to_path_buf();
+
+    // 1. Create shared base commit R (empty — uses root commit tree so is_empty() = true).
+    let mut tx = repo.start_transaction();
+    let root_id_t12 = repo.store().root_commit_id().clone();
+    let root_commit_t12 = repo.store().get_commit(&root_id_t12).unwrap();
+    let r = tx
+        .repo_mut()
+        .new_commit(vec![root_id_t12.clone()], root_commit_t12.tree())
+        .set_description("base R for T12")
+        .write()
+        .unwrap();
+    let target_change = r.change_id().clone();
+    let repo_r = tx.commit("create R T12").unwrap();
+    let op_r = repo_r.operation().clone();
+
+    // 2. Lineage A: rewrites R → E_a (empty, predecessor = R).
+    brevity::fork_agent_oplog(&repo_dir, "writer-a-t12", repo_r.op_heads_store().as_ref())
+        .block_on()
+        .unwrap();
+    let loader_a = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-a-t12").unwrap();
+    let repo_a = loader_a.load_at_head().unwrap();
+    let r_in_a = repo_a.store().get_commit(r.id()).unwrap();
+    let mut tx = repo_a.start_transaction();
+    let e_a = tx
+        .repo_mut()
+        .rewrite_commit(&r_in_a)
+        .set_description("slice placeholder A-t12")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_a = tx
+        .commit("lineage-A empty T12")
+        .unwrap()
+        .operation()
+        .clone();
+
+    // 3. Lineage B: independently rewrites R → E_b (empty, predecessor = R, no
+    //    edge to E_a). Forks from op_r, not op_a.
+    brevity::fork_agent_oplog(&repo_dir, "writer-b-t12", repo_r.op_heads_store().as_ref())
+        .block_on()
+        .unwrap();
+    let loader_b = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-b-t12").unwrap();
+    let repo_b = loader_b.load_at_head().unwrap();
+    let r_in_b = repo_b.store().get_commit(r.id()).unwrap();
+    let mut tx = repo_b.start_transaction();
+    let e_b = tx
+        .repo_mut()
+        .rewrite_commit(&r_in_b)
+        .set_description("[Slice] placeholder B-t12")
+        .write()
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let op_b = tx
+        .commit("lineage-B empty T12")
+        .unwrap()
+        .operation()
+        .clone();
+
+    // Verify both are empty.
+    {
+        let check_a = loader_a.load_at(&op_a).unwrap();
+        let check_b = loader_b.load_at(&op_b).unwrap();
+        assert!(
+            check_a
+                .store()
+                .get_commit(e_a.id())
+                .unwrap()
+                .is_empty(&*check_a)
+                .unwrap_or(false),
+            "T12 setup: E_a must be empty"
+        );
+        assert!(
+            check_b
+                .store()
+                .get_commit(e_b.id())
+                .unwrap()
+                .is_empty(&*check_b)
+                .unwrap_or(false),
+            "T12 setup: E_b must be empty"
+        );
+    }
+
+    // 4. Build a merged view that sees both E_a and E_b as heads, with E_b
+    //    registered as the wc commit. Then call dedup_evolved_heads directly.
+    //    We use a fresh transaction on repo_b's snapshot (which has E_b as head).
+    let repo_b_snap = loader_b.load_at(&op_b).unwrap();
+    let mut tx = repo_b_snap.start_transaction();
+    // E_a was hidden by the lineage-B rewrite in its own oplog; force it back
+    // into the view so we see both siblings.
+    let e_a_commit = tx.repo_mut().store().get_commit(e_a.id()).unwrap();
+    tx.repo_mut().add_head(&e_a_commit).unwrap();
+    // Register E_b as the wc commit.
+    tx.repo_mut()
+        .set_wc_commit(
+            jj_lib::ref_name::WorkspaceNameBuf::from("ws-t12"),
+            e_b.id().clone(),
+        )
+        .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+
+    // Pre-dedup sanity: both must appear as view heads (or ancestors).
+    let pre_heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
+    let pre_change_count = pre_heads
+        .iter()
+        .filter(|id| {
+            tx.repo()
+                .store()
+                .get_commit(id)
+                .ok()
+                .filter(|c| *c.change_id() == target_change)
+                .is_some()
+        })
+        .count();
+    assert!(
+        pre_change_count >= 2,
+        "T12 setup: both must be view heads before dedup; got {pre_change_count}"
+    );
+
+    // Invoke dedup: E_b is wc-referenced → it must survive; E_a must be removed.
+    let merged_ops = [op_r.clone(), op_a.clone(), op_b.clone()];
+    tx.repo_mut()
+        .dedup_evolved_heads(&merged_ops, None)
+        .unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    assert_eq!(rebased, 0, "T12: dedup must not author commits");
+
+    // Post-dedup: exactly 1 visible with target_change, must be E_b.
+    let post_heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
+    let survivors: Vec<CommitId> = post_heads
+        .iter()
+        .filter(|id| {
+            tx.repo()
+                .store()
+                .get_commit(id)
+                .ok()
+                .filter(|c| *c.change_id() == target_change)
+                .is_some()
+        })
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        survivors.len(),
+        1,
+        "T12: both-empty pair with wc-ref must collapse to 1 visible; got {}",
+        survivors.len()
+    );
+    assert_eq!(
+        &survivors[0],
+        e_b.id(),
+        "T12: wc-referenced E_b must survive; got {}",
+        &survivors[0].hex()[..8]
+    );
+
+    // wc must still point to E_b.
+    let wc_id = tx
+        .repo()
+        .view()
+        .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::new("ws-t12"));
+    assert_eq!(wc_id, Some(e_b.id()), "T12: wc must still point to E_b");
+
+    eprintln!("T12: wc-referenced empty sibling survives — confirmed");
+}

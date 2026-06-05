@@ -2542,15 +2542,16 @@ impl MutableRepo {
         //          parents' tree, i.e. Commit::is_empty() — an empty sibling carries
         //          no content, so hiding it is also lossless). Non-identical non-empty
         //          siblings are HONEST divergence → fail open.
-        //      (c) at least one member of the sibling group was authored by THIS merge
-        //          process — i.e., its id appears as a key in `self.commit_predecessors`
-        //          (the in-flight rewrite map that has not yet been committed to disk).
-        //          This is the definitive discriminant between merge-created mechanical
-        //          siblings and genuine concurrent rewrites. EXCEPTION: for the
-        //          EMPTY-sibling case (candidate h is empty), guard (c) is relaxed —
-        //          empty siblings that survive across multiple reconciles never appear
-        //          in any merge's commit_predecessors, but they are still provably
-        //          lossless to remove. Guard (b) + guard (a) (no wc ref) is sufficient.
+        //      (c) NON-EMPTY candidates only: at least one member of the sibling group
+        //          was authored by THIS merge process — i.e., its id appears as a key
+        //          in `self.commit_predecessors`. This distinguishes merge-created
+        //          mechanical siblings from genuine concurrent rewrites (two independent
+        //          agents both rewrote the same commit; neither rewrite is in the
+        //          merge's commit_predecessors). For EMPTY candidates, guard (c) is
+        //          dropped entirely: emptiness alone proves losslessness, and the
+        //          two-writer both-empty shape (pre-create vs loop-describe) has no
+        //          predecessor edge in any reconcile's commit_predecessors by
+        //          construction. Guards (a) + (b)-empty + (d) are sufficient.
         //      (d) passes the same exclusive-ancestor validation as stale-gen removals,
         //          evaluated against (all_stale ∪ already-approved mechanical siblings)
         //
@@ -2633,22 +2634,20 @@ impl MutableRepo {
             // Guard (c) pre-check: group-level discriminant.
             //   • For non-empty candidate paths: require at least one merge-authored
             //     member (definitive discriminant vs genuine concurrent divergence).
-            //   • For the empty-candidate path: guard (c) is relaxed — an empty
-            //     non-wc-referenced sibling is provably lossless and may persist
-            //     across many reconciles without ever entering commit_predecessors.
-            //     We still check the group has at least one non-empty survivor candidate
-            //     (to avoid removing ALL members of an all-empty group, which would
-            //     be valid but degenerate and is outside the designed use-case).
+            //   • For the empty-candidate path: NO predecessor proof required.
+            //     Emptiness alone proves losslessness — a commit that adds nothing over
+            //     its parents cannot carry content that would be lost. The two-writer
+            //     shape (wave pre-create + loop task-describe, both producing empty
+            //     commits with no predecessor edge between them) must also be handled,
+            //     so the empty path explicitly does NOT require any_merge_authored or
+            //     any_non_empty. Guards (a) + (b)-empty + (d) are sufficient.
             let any_merge_authored = group.iter().any(|id| merge_authored_ids.contains(id));
             let any_empty_non_wc = group
                 .iter()
                 .any(|id| *member_empty.get(id).unwrap_or(&false) && !wc_ids.contains(id));
-            let any_non_empty = group
-                .iter()
-                .any(|id| !member_empty.get(id).unwrap_or(&false));
 
             // Skip the group entirely if neither path applies.
-            if !(any_merge_authored || any_empty_non_wc && any_non_empty) {
+            if !(any_merge_authored || any_empty_non_wc) {
                 if let Some(log) = debug_log {
                     log(&format!(
                         "[dedup_evolved_heads] mechanical-sibling group for change {} has no \
