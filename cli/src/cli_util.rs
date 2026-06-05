@@ -715,7 +715,7 @@ impl CommandHelper {
         &self,
         ui: &Ui,
         repo_loader: &RepoLoader,
-        workspace_name: &WorkspaceName,
+        _workspace_name: &WorkspaceName,
     ) -> Result<Operation, CommandError> {
         if let Some(op_str) = &self.data.global_args.at_operation {
             Ok(op_walk::resolve_op_for_load(repo_loader, op_str).block_on()?)
@@ -728,27 +728,11 @@ impl CommandHelper {
                         ui.status(),
                         "Concurrent modification detected, resolving automatically.",
                     )?;
-                    let base_repo = repo_loader.load_at(&op_heads[0]).block_on()?;
-                    // TODO: It may be helpful to print each operation we're merging here
-                    let mut tx =
-                        start_repo_transaction(&base_repo, workspace_name, &self.data.string_args);
-                    for other_op_head in op_heads.into_iter().skip(1) {
-                        tx.merge_operation(other_op_head).await?;
-                        let num_rebased = tx.repo_mut().rebase_descendants().await?;
-                        if num_rebased > 0 {
-                            writeln!(
-                                ui.status(),
-                                "Rebased {num_rebased} descendant commits onto commits rewritten \
-                                 by other operation"
-                            )?;
-                        }
-                    }
-                    Ok(tx
-                        .write("reconcile divergent operations")
-                        .await?
-                        .leave_unpublished()
-                        .operation()
-                        .clone())
+                    // Use the library merge path so dedup and divergence
+                    // instrumentation run for automatic CLI reconciliation.
+                    Ok(repo_loader
+                        .merge_operations(op_heads, Some("reconcile divergent operations"))
+                        .await?)
                 },
             )
             .block_on()
