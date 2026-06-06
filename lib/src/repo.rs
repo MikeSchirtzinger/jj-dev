@@ -22,6 +22,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::slice;
 use std::sync::Arc;
 
@@ -668,6 +669,49 @@ pub enum RepoLoaderError {
     TransactionCommit(#[from] TransactionCommitError),
 }
 
+/// Resolve the op_heads directory for `repo_path`, honoring the
+/// `JJ_OP_HEADS_DIR` override only when it is scoped to this repo.
+///
+/// A `repo_scope` file inside the override directory (written by the
+/// orchestrator when it forks an agent's op-heads store) names the
+/// `.jj/repo` directory the override belongs to. Any OTHER repo loaded
+/// with the same environment — e.g. a temp repo created by a test the
+/// agent runs (`cargo test` inherits the agent's env) — must NOT inherit
+/// the private head store: its head ids are unloadable from the foreign
+/// op store, which wedges every command in that repo ("Failed to load an
+/// operation", observed live 2026-06-06), and any head it registered
+/// would dangle (head file with no operation object) once folded back.
+///
+/// An override directory without a `repo_scope` file applies
+/// unconditionally (legacy behavior, pre-scoping forks).
+fn op_heads_path_for_repo(repo_path: &Path, override_dir: Option<PathBuf>) -> PathBuf {
+    let Some(dir) = override_dir else {
+        return repo_path.join("op_heads");
+    };
+    let scope_file = dir.join("repo_scope");
+    match std::fs::read_to_string(&scope_file) {
+        Ok(scope) => {
+            let scope_path = PathBuf::from(scope.trim());
+            let scope_canon = scope_path.canonicalize().unwrap_or(scope_path);
+            let repo_canon = repo_path
+                .canonicalize()
+                .unwrap_or_else(|_| repo_path.to_path_buf());
+            if scope_canon == repo_canon {
+                dir
+            } else {
+                tracing::debug!(
+                    override_dir = %dir.display(),
+                    scoped_to = %scope_canon.display(),
+                    loading = %repo_canon.display(),
+                    "JJ_OP_HEADS_DIR is scoped to a different repo — ignoring override",
+                );
+                repo_path.join("op_heads")
+            }
+        }
+        Err(_) => dir, // no scope declared — legacy behavior
+    }
+}
+
 /// Helps create `ReadonlyRepo` instances of a repo at the head operation or at
 /// a given operation.
 #[derive(Clone)]
@@ -724,10 +768,13 @@ impl RepoLoader {
         )?);
         // Support per-agent oplog isolation: JJ_OP_HEADS_DIR overrides the
         // default op_heads path, letting parallel agents each use a private
-        // ForkedOpHeadsStore without cross-workspace staleness.
-        let op_heads_path = std::env::var("JJ_OP_HEADS_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| repo_path.join("op_heads"));
+        // ForkedOpHeadsStore without cross-workspace staleness. The override
+        // is scoped to the repo it was forked for — see
+        // `op_heads_path_for_repo`.
+        let op_heads_path = op_heads_path_for_repo(
+            repo_path,
+            std::env::var_os("JJ_OP_HEADS_DIR").map(std::path::PathBuf::from),
+        );
         let op_heads_store =
             Arc::from(store_factories.load_op_heads_store(settings, &op_heads_path)?);
         let index_store =
@@ -3039,5 +3086,88 @@ mod dirty_cell {
                 *self.dirty.get_mut() = Some(value);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod repo_loader_tests {
+    use super::op_heads_path_for_repo;
+
+    #[test]
+    fn no_override_uses_repo_op_heads() {
+        let tmp = testutils::new_temp_dir();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let resolved = op_heads_path_for_repo(&repo_path, None);
+        assert_eq!(resolved, repo_path.join("op_heads"));
+    }
+
+    #[test]
+    fn unscoped_override_applies_unconditionally_legacy() {
+        let tmp = testutils::new_temp_dir();
+        let repo_path = tmp.path().join("repo");
+        let override_dir = tmp.path().join("agent-op-heads");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        std::fs::create_dir_all(&override_dir).unwrap();
+        // No repo_scope file — pre-scoping fork layout.
+        let resolved = op_heads_path_for_repo(&repo_path, Some(override_dir.clone()));
+        assert_eq!(resolved, override_dir);
+    }
+
+    #[test]
+    fn scoped_override_applies_to_matching_repo() {
+        let tmp = testutils::new_temp_dir();
+        let repo_path = tmp.path().join("repo");
+        let override_dir = tmp.path().join("agent-op-heads");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("repo_scope"),
+            repo_path.canonicalize().unwrap().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let resolved = op_heads_path_for_repo(&repo_path, Some(override_dir.clone()));
+        assert_eq!(resolved, override_dir);
+    }
+
+    #[test]
+    fn scoped_override_ignored_for_foreign_repo() {
+        // The dangling-head minting scenario (2026-06-06): a temp repo
+        // created by a test inherits the agent's JJ_OP_HEADS_DIR. The
+        // override is scoped to the main repo, so the temp repo must get
+        // its OWN op_heads.
+        let tmp = testutils::new_temp_dir();
+        let main_repo = tmp.path().join("main-repo");
+        let temp_repo = tmp.path().join("test-temp-repo");
+        let override_dir = tmp.path().join("agent-op-heads");
+        std::fs::create_dir_all(&main_repo).unwrap();
+        std::fs::create_dir_all(&temp_repo).unwrap();
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("repo_scope"),
+            main_repo.canonicalize().unwrap().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let resolved = op_heads_path_for_repo(&temp_repo, Some(override_dir));
+        assert_eq!(resolved, temp_repo.join("op_heads"));
+    }
+
+    #[test]
+    fn scope_comparison_is_canonical() {
+        // A non-canonical scope entry (trailing component traversal) still
+        // matches the same physical directory.
+        let tmp = testutils::new_temp_dir();
+        let repo_path = tmp.path().join("repo");
+        let override_dir = tmp.path().join("agent-op-heads");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        std::fs::create_dir_all(&override_dir).unwrap();
+        let non_canonical = tmp.path().join("repo").join("..").join("repo");
+        std::fs::write(
+            override_dir.join("repo_scope"),
+            non_canonical.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let resolved = op_heads_path_for_repo(&repo_path, Some(override_dir.clone()));
+        assert_eq!(resolved, override_dir);
     }
 }
