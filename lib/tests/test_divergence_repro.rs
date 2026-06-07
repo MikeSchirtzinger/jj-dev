@@ -2471,3 +2471,37 @@ fn t12_both_empty_wc_referenced_member_survives() {
 
     eprintln!("T12: wc-referenced empty sibling survives — confirmed");
 }
+
+/// REGRESSION (2026-06-06 dangling-head minter): the lib-side fork must write
+/// a `repo_scope` marker so the `JJ_OP_HEADS_DIR` override is honored ONLY by
+/// the repo it was forked for (see `op_heads_path_for_repo`). Without it, a
+/// foreign repo loaded in the same environment (e.g. a temp repo created by a
+/// test the agent runs) can register op-heads into this private store via a
+/// resolve-bypass mutation (`--at-op <id> <mutation>`) while the operation
+/// object lands in the foreign repo's op_store — a dangling head once that
+/// repo is deleted. The hox-orchestrator fork path writes the same marker.
+#[test]
+fn fork_agent_oplog_writes_repo_scope_marker() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let repo_path = test_repo.repo_path().to_path_buf();
+
+    brevity::fork_agent_oplog(&repo_path, "agent-scope", repo.op_heads_store().as_ref())
+        .block_on()
+        .unwrap();
+
+    let scope_file = repo_path
+        .parent()
+        .expect(".jj dir")
+        .join("agent-oplogs")
+        .join("agent-scope")
+        .join("op_heads")
+        .join("repo_scope");
+    let scope = std::fs::read_to_string(&scope_file).expect("repo_scope file must exist");
+    let expected = repo_path.canonicalize().unwrap_or(repo_path.clone());
+    assert_eq!(
+        std::path::PathBuf::from(scope.trim()),
+        expected,
+        "repo_scope must name the forked repo's .jj/repo dir"
+    );
+}

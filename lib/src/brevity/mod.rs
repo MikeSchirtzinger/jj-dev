@@ -148,6 +148,23 @@ pub async fn fork_agent_oplog(
     // Write the type file for StoreFactories dispatch
     fs::write(op_heads_dir.join("type"), ForkedOpHeadsStore::name())?;
 
+    // Scope the override to the repo it was forked for (2026-06-06): the
+    // `JJ_OP_HEADS_DIR` override is honored only when this file names the
+    // loading repo's `.jj/repo` dir (see `op_heads_path_for_repo`). Without
+    // it, any OTHER repo loaded in the same environment inherits this
+    // private store — its resolve-path commands wedge ("Failed to load an
+    // operation"), and a resolve-bypass mutation (`--at-op <id> <mutation>`)
+    // registers its op-head HERE while the operation object lands in the
+    // foreign repo's op_store: a dangling head once that repo is deleted.
+    // Mirrors the hox-orchestrator fork path (workspace.rs).
+    let scope = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    fs::write(
+        op_heads_dir.join("repo_scope"),
+        scope.to_string_lossy().as_bytes(),
+    )?;
+
     Ok(forked_store)
 }
 
