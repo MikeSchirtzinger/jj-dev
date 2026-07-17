@@ -71,7 +71,6 @@ use crate::object_id::PrefixResolution;
 use crate::op_heads_store;
 use crate::op_heads_store::OpHeadsStore;
 use crate::op_heads_store::OpHeadsStoreError;
-use crate::op_heads_store::read_op_heads_non_mutating;
 use crate::op_store;
 use crate::op_store::OpStore;
 use crate::op_store::OpStoreError;
@@ -675,6 +674,12 @@ pub enum RepoLoaderError {
     OpStore(#[from] OpStoreError),
     #[error(transparent)]
     TransactionCommit(#[from] TransactionCommitError),
+    #[error("Operation heads are missing; select a known operation explicitly with --at-op <id>")]
+    OpHeadsMissing,
+    #[error(
+        "Operation heads are divergent ({heads:?}); select one explicitly with --at-op <id>"
+    )]
+    OpHeadsDivergent { heads: Vec<OperationId> },
 }
 
 /// Helps create `ReadonlyRepo` instances of a repo at the head operation or at
@@ -793,24 +798,21 @@ impl RepoLoader {
         self.finish_load(op, view).await
     }
 
-    /// Load the repo at the current head without acquiring write locks or
-    /// resolving divergent op heads via merge operations.
+    /// Load the repo at its sole current head without locks or mutation.
     ///
-    /// When multiple op heads exist (e.g. from N concurrent agents each writing
-    /// their own operations), this method picks the one with the latest end
-    /// timestamp rather than merging them. This is guaranteed non-mutating:
-    /// no merge operation is written, no lock is acquired.
-    ///
-    /// Use this for read-only commands (`jj log`, `jj diff`, `jj status`) in
-    /// parallel agent environments where divergent heads are expected and should
-    /// only be resolved by the orchestrator at merge time.
-    pub fn load_at_head_readonly(&self) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
-        let op = read_op_heads_non_mutating::<RepoLoaderError>(
-            self.op_heads_store.as_ref(),
-            &self.op_store,
-        )?;
-        let view = op.view()?;
-        self.finish_load(op, view)
+    /// Divergent heads fail closed. Callers must select a specific operation
+    /// with `--at-op` instead of silently trusting a recency tie-break.
+    pub async fn load_at_head_readonly(&self) -> Result<Arc<ReadonlyRepo>, RepoLoaderError> {
+        let heads = self.op_heads_store.get_op_heads().await?;
+        let op_id = match heads.as_slice() {
+            [] => return Err(RepoLoaderError::OpHeadsMissing),
+            [op_id] => op_id.clone(),
+            _ => return Err(RepoLoaderError::OpHeadsDivergent { heads }),
+        };
+        let data = self.op_store.read_operation(&op_id).await?;
+        let op = Operation::new(self.op_store.clone(), op_id, data);
+        let view = op.view().await?;
+        self.finish_load(op, view).await
     }
 
     /// Returns a clone of this loader that uses a [`ReadOnlyOpHeadsStore`]

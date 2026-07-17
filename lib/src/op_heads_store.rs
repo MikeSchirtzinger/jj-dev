@@ -161,51 +161,6 @@ where
     Ok(new_op)
 }
 
-/// Read op heads without acquiring any locks or triggering merge operations.
-///
-/// When multiple op heads exist (divergent state from concurrent agents),
-/// this returns the one with the latest end timestamp rather than merging.
-/// Guaranteed non-mutating: never writes to the store.
-///
-/// Use this for read-only operations (jj log, jj diff, jj status) in
-/// parallel agent environments where divergent heads are expected and should
-/// not be automatically resolved.
-pub fn read_op_heads_non_mutating<E>(
-    op_heads_store: &dyn OpHeadsStore,
-    op_store: &Arc<dyn OpStore>,
-) -> Result<Operation, E>
-where
-    E: From<OpHeadResolutionError> + From<OpHeadsStoreError> + From<OpStoreError>,
-{
-    let op_head_ids = op_heads_store.get_op_heads().block_on()?;
-
-    if op_head_ids.is_empty() {
-        return Err(OpHeadResolutionError::NoHeads.into());
-    }
-
-    if op_head_ids.len() == 1 {
-        let op_id = op_head_ids.into_iter().next().unwrap();
-        let data = op_store.read_operation(&op_id).block_on()?;
-        return Ok(Operation::new(op_store.clone(), op_id, data));
-    }
-
-    // Multiple heads: pick the one with the latest end timestamp.
-    // Do NOT merge, lock, or write — just observe.
-    let mut best_op: Option<Operation> = None;
-    for op_id in &op_head_ids {
-        let data = op_store.read_operation(op_id).block_on()?;
-        let op = Operation::new(op_store.clone(), op_id.clone(), data);
-        let is_newer = best_op
-            .as_ref()
-            .map(|b| op.metadata().time.end.timestamp > b.metadata().time.end.timestamp)
-            .unwrap_or(true);
-        if is_newer {
-            best_op = Some(op);
-        }
-    }
-    Ok(best_op.unwrap())
-}
-
 /// A no-op lock used by read-only store implementations.
 struct NoOpLock;
 impl OpHeadsStoreLock for NoOpLock {}
