@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use jj_lib::forked_op_heads_store::ForkedOpHeadsStore;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_heads_store::OpHeadsStore;
+use jj_lib::op_heads_store::OpHeadsStore as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::repo::RepoLoader;
 use jj_lib::repo::StoreFactories;
@@ -40,8 +40,8 @@ fn test_forked_op_heads_fork_from() {
     let agent_dir = testutils::new_temp_dir();
 
     // Create a parent store with one head.
-    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
+    let parent = SimpleOpHeadsStore::init(parent_dir.path(), &id1).unwrap();
     parent.update_op_heads(&[], &id1).block_on().unwrap();
 
     let forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
@@ -62,15 +62,15 @@ fn test_forked_op_heads_update() {
     let parent_dir = testutils::new_temp_dir();
     let agent_dir = testutils::new_temp_dir();
 
-    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
+    let parent = SimpleOpHeadsStore::init(parent_dir.path(), &id1).unwrap();
     parent.update_op_heads(&[], &id1).block_on().unwrap();
 
     let forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
 
     let id2 = OperationId::from_hex("11223344");
     forked
-        .update_op_heads(&[id1.clone()], &id2)
+        .update_op_heads(std::slice::from_ref(&id1), &id2)
         .block_on()
         .unwrap();
 
@@ -89,8 +89,8 @@ fn test_forked_op_heads_lock() {
     let parent_dir = testutils::new_temp_dir();
     let agent_dir = testutils::new_temp_dir();
 
-    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
+    let parent = SimpleOpHeadsStore::init(parent_dir.path(), &id1).unwrap();
     parent.update_op_heads(&[], &id1).block_on().unwrap();
 
     let forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
@@ -107,8 +107,8 @@ fn test_forked_op_heads_load_roundtrip() {
     let parent_dir = testutils::new_temp_dir();
     let agent_dir = testutils::new_temp_dir();
 
-    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
+    let parent = SimpleOpHeadsStore::init(parent_dir.path(), &id1).unwrap();
     parent.update_op_heads(&[], &id1).block_on().unwrap();
 
     let _forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
@@ -136,8 +136,8 @@ fn test_forked_store_registered_in_factories() {
     let agent_dir = testutils::new_temp_dir();
 
     // Create a parent, fork from it to get a valid forked store on disk
-    let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
     let id1 = OperationId::from_hex("aabbccdd");
+    let parent = SimpleOpHeadsStore::init(parent_dir.path(), &id1).unwrap();
     parent.update_op_heads(&[], &id1).block_on().unwrap();
     let _forked = ForkedOpHeadsStore::fork_from(&parent, id1.clone(), agent_dir.path()).unwrap();
 
@@ -194,12 +194,12 @@ fn test_forked_op_heads_independent_of_shared() {
         repo.loader().index_store().clone(),
         repo.loader().submodule_store().clone(),
     );
-    let forked_repo = forked_loader.load_at_head().unwrap();
+    let forked_repo = forked_loader.load_at_head().block_on().unwrap();
 
     // Commit a transaction via the forked repo
     let mut tx = forked_repo.start_transaction();
     write_random_commit(tx.repo_mut());
-    let forked_committed = tx.commit("forked transaction").unwrap();
+    let forked_committed = tx.commit("forked transaction").block_on().unwrap();
     let forked_op_id = forked_committed.operation().id().hex();
 
     // The forked store should have the new op head

@@ -33,6 +33,7 @@ use jj_lib::op_walk::OpsetResolutionError;
 use jj_lib::operation::Operation;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
+use jj_lib::repo::RepoLoaderError;
 use jj_lib::settings::UserSettings;
 use pollster::FutureExt as _;
 use testutils::CommitBuilderExt as _;
@@ -82,6 +83,35 @@ fn test_unpublished_operation() -> TestResult {
     assert_eq!(list_dir(&op_heads_dir), vec![op_id0.hex()]);
     unpublished_op.publish().block_on()?;
     assert_eq!(list_dir(&op_heads_dir), vec![op_id1.hex()]);
+    Ok(())
+}
+
+#[test]
+fn test_load_at_head_readonly_fails_closed_on_divergence() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let mut tx = repo.start_transaction();
+    write_random_commit(tx.repo_mut());
+    let unpublished = tx.write("divergent operation").block_on()?;
+    let divergent_op_id = unpublished.operation().id().clone();
+    unpublished.leave_unpublished();
+    repo.op_heads_store()
+        .update_op_heads(&[], &divergent_op_id)
+        .block_on()?;
+
+    let error = repo
+        .loader()
+        .load_at_head_readonly()
+        .block_on()
+        .unwrap_err();
+    assert_matches!(
+        error,
+        RepoLoaderError::OpHeadsDivergent { heads }
+            if heads.len() == 2
+                && heads.contains(repo.op_id())
+                && heads.contains(&divergent_op_id)
+    );
     Ok(())
 }
 

@@ -1197,39 +1197,39 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         Ok(RevsetExpression::coalesce(&expressions))
     });
     // Hox metadata functions
-    map.insert("priority", |diagnostics, function, context| {
+    map.insert("priority", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::Priority(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("status", |diagnostics, function, context| {
+    map.insert("status", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::Status(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("agent", |diagnostics, function, context| {
+    map.insert("agent", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::Agent(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("orchestrator", |diagnostics, function, context| {
+    map.insert("orchestrator", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::Orchestrator(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("msg_to", |diagnostics, function, context| {
+    map.insert("msg_to", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::MsgTo(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("msg_type", |diagnostics, function, context| {
+    map.insert("msg_type", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::MsgType(expr);
         Ok(RevsetExpression::filter(predicate))
     });
@@ -2645,7 +2645,9 @@ fn reload_repo_at_operation(
             | RepoLoaderError::IndexStore(_)
             | RepoLoaderError::OpHeadsStoreError(_)
             | RepoLoaderError::OpStore(_)
-            | RepoLoaderError::TransactionCommit(_) => RevsetResolutionError::Other(err.into()),
+            | RepoLoaderError::TransactionCommit(_)
+            | RepoLoaderError::OpHeadsMissing
+            | RepoLoaderError::OpHeadsDivergent { .. } => RevsetResolutionError::Other(err.into()),
         })
 }
 

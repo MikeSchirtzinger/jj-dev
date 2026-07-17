@@ -187,7 +187,7 @@ impl ReadOnlyOpHeadsStore {
 
 #[async_trait]
 impl OpHeadsStore for ReadOnlyOpHeadsStore {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "read_only_op_heads_store"
     }
 

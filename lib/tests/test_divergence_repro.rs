@@ -97,7 +97,7 @@ fn collect_visible_commits(
     loader: &jj_lib::repo::RepoLoader,
     op: &jj_lib::operation::Operation,
 ) -> HashSet<CommitId> {
-    let repo = loader.load_at(op).unwrap();
+    let repo = loader.load_at(op).block_on().unwrap();
     let heads: Vec<CommitId> = repo.view().heads().iter().cloned().collect();
     let mut result: HashSet<CommitId> = HashSet::new();
     let mut stack = heads;
@@ -180,7 +180,7 @@ fn assert_authored_commits_are_honest_rewrites(
     }
 
     // Collect all predecessor edges from the merged op and its ancestry.
-    let merged_repo = loader.load_at(merged_op).unwrap();
+    let merged_repo = loader.load_at(merged_op).block_on().unwrap();
     let mut preds: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
     let mut op_stack: Vec<jj_lib::operation::Operation> = vec![merged_op.clone()];
     let mut seen_ops: HashSet<jj_lib::op_store::OperationId> = HashSet::new();
@@ -196,10 +196,8 @@ fn assert_authored_commits_are_honest_rewrites(
                     .extend(old_ids.iter().cloned());
             }
         }
-        for parent in op.parents() {
-            if let Ok(p) = parent {
-                op_stack.push(p);
-            }
+        for parent in op.parents().block_on().unwrap() {
+            op_stack.push(parent);
         }
     }
     drop(merged_repo);
@@ -245,9 +243,10 @@ fn repro_single_agent_three_rewrites() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] original")
         .write()
+        .block_on()
         .unwrap();
     let change_id = c1.change_id().clone();
-    let shared_after_c1 = tx.commit("new empty commit").unwrap();
+    let shared_after_c1 = tx.commit("new empty commit").block_on().unwrap();
 
     // 2. Fork op heads by file copy (mimics hox exactly).
     brevity::fork_agent_oplog(
@@ -261,7 +260,7 @@ fn repro_single_agent_three_rewrites() {
     // 3. Agent loop (PRIVATE store) rewrites C1 several times.
     let agent_loader =
         brevity::agent_repo_loader(shared_after_c1.loader(), &repo_path, "agent-0").unwrap();
-    let agent_repo = agent_loader.load_at_head().unwrap();
+    let agent_repo = agent_loader.load_at_head().block_on().unwrap();
 
     // describe #1
     let mut tx = agent_repo.start_transaction();
@@ -270,9 +269,10 @@ fn repro_single_agent_three_rewrites() {
         .rewrite_commit(&c1)
         .set_description("slice[0] intermediate")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo = tx.commit("describe commit C1").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo = tx.commit("describe commit C1").block_on().unwrap();
 
     // describe #2
     let mut tx = agent_repo.start_transaction();
@@ -281,9 +281,10 @@ fn repro_single_agent_three_rewrites() {
         .rewrite_commit(&g2)
         .set_description("slice[0] intermediate 2")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo = tx.commit("describe commit G2").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo = tx.commit("describe commit G2").block_on().unwrap();
 
     // squash-equivalent rewrite #3
     let mut tx = agent_repo.start_transaction();
@@ -292,9 +293,10 @@ fn repro_single_agent_three_rewrites() {
         .rewrite_commit(&g3)
         .set_description("[Slice 0] final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    tx.commit("squash commits into G3").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    tx.commit("squash commits into G3").block_on().unwrap();
 
     // 5. Merge-back: reconcile divergent operations on the SHARED store.
     brevity::merge_agent_oplog(shared_after_c1.loader(), &repo_path, "agent-0")
@@ -302,7 +304,7 @@ fn repro_single_agent_three_rewrites() {
         .unwrap();
 
     // 6. Load shared at head; assert exactly ONE visible commit for C1.
-    let reloaded = repo.loader().load_at_head().unwrap();
+    let reloaded = repo.loader().load_at_head().block_on().unwrap();
     dump_chain(&reloaded, "SCENARIO A (single agent, 3 rewrites)");
     let by_change = visible_commits_by_change(&reloaded);
     let visible = by_change.get(&change_id).map(|v| v.len()).unwrap_or(0);
@@ -338,9 +340,10 @@ fn repro_third_lineage_all_orderings() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] original")
         .write()
+        .block_on()
         .unwrap();
     let change_id = c1.change_id().clone();
-    let shared_after_c1 = tx.commit("new empty commit").unwrap();
+    let shared_after_c1 = tx.commit("new empty commit").block_on().unwrap();
     let op_g1 = shared_after_c1.operation().clone();
 
     brevity::fork_agent_oplog(
@@ -353,16 +356,17 @@ fn repro_third_lineage_all_orderings() {
 
     let agent_loader =
         brevity::agent_repo_loader(shared_after_c1.loader(), &repo_path, "agent-0").unwrap();
-    let agent_repo = agent_loader.load_at_head().unwrap();
+    let agent_repo = agent_loader.load_at_head().block_on().unwrap();
     let mut tx = agent_repo.start_transaction();
     let g2 = tx
         .repo_mut()
         .rewrite_commit(&c1)
         .set_description("slice[0] intermediate")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo_g2 = tx.commit("describe commit C1 -> G2").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo_g2 = tx.commit("describe commit C1 -> G2").block_on().unwrap();
     let op_g2 = agent_repo_g2.operation().clone();
 
     let agent_repo = agent_repo_g2;
@@ -372,9 +376,10 @@ fn repro_third_lineage_all_orderings() {
         .rewrite_commit(&g2)
         .set_description("slice[0] intermediate 2")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo = tx.commit("describe commit G2 -> G3").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo = tx.commit("describe commit G2 -> G3").block_on().unwrap();
 
     let mut tx = agent_repo.start_transaction();
     let _g4 = tx
@@ -382,9 +387,13 @@ fn repro_third_lineage_all_orderings() {
         .rewrite_commit(&g3)
         .set_description("[Slice 0] final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo_g4 = tx.commit("squash commits into G3 -> G4").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo_g4 = tx
+        .commit("squash commits into G3 -> G4")
+        .block_on()
+        .unwrap();
     let op_g4 = agent_repo_g4.operation().clone();
 
     // Try all 6 orderings of [G1, G2, G4].
@@ -404,6 +413,7 @@ fn repro_third_lineage_all_orderings() {
         let merged = repo
             .loader()
             .merge_operations(ops.clone(), Some("reconcile divergent operations"))
+            .block_on()
             .unwrap();
 
         // v3 no-authoring invariant.
@@ -414,7 +424,7 @@ fn repro_third_lineage_all_orderings() {
             &format!("SCENARIO B order {order:?}"),
         );
 
-        let reloaded = repo.loader().load_at(&merged).unwrap();
+        let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
         let by_change = visible_commits_by_change(&reloaded);
         let visible = by_change.get(&change_id).map(|v| v.len()).unwrap_or(0);
         eprintln!("order {order:?} -> {visible} visible commit(s) for C1");
@@ -441,14 +451,15 @@ fn repro_minimal_g1_g4_g2() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] original")
         .write()
+        .block_on()
         .unwrap();
     let change_id = c1.change_id().clone();
-    let shared_after_c1 = tx.commit("new empty commit").unwrap();
+    let shared_after_c1 = tx.commit("new empty commit").block_on().unwrap();
     let op_g1 = shared_after_c1.operation().clone();
     eprintln!(
         "G1 op={} C1 commit={}",
-        op_g1.id().hex()[..8].to_string(),
-        c1.id().hex()[..8].to_string()
+        &op_g1.id().hex()[..8],
+        &c1.id().hex()[..8]
     );
 
     brevity::fork_agent_oplog(
@@ -460,7 +471,7 @@ fn repro_minimal_g1_g4_g2() {
     .unwrap();
     let agent_loader =
         brevity::agent_repo_loader(shared_after_c1.loader(), &repo_path, "agent-0").unwrap();
-    let agent_repo = agent_loader.load_at_head().unwrap();
+    let agent_repo = agent_loader.load_at_head().block_on().unwrap();
 
     let mut tx = agent_repo.start_transaction();
     let g2 = tx
@@ -468,14 +479,15 @@ fn repro_minimal_g1_g4_g2() {
         .rewrite_commit(&c1)
         .set_description("slice[0] intermediate")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo_g2 = tx.commit("describe commit C1 -> G2").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo_g2 = tx.commit("describe commit C1 -> G2").block_on().unwrap();
     let op_g2 = agent_repo_g2.operation().clone();
     eprintln!(
         "G2 op={} G2 commit={}",
-        op_g2.id().hex()[..8].to_string(),
-        g2.id().hex()[..8].to_string()
+        &op_g2.id().hex()[..8],
+        &g2.id().hex()[..8]
     );
 
     let agent_repo = agent_repo_g2;
@@ -485,10 +497,11 @@ fn repro_minimal_g1_g4_g2() {
         .rewrite_commit(&g2)
         .set_description("slice[0] intermediate 2")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo = tx.commit("describe commit G2 -> G3").unwrap();
-    eprintln!("G3 commit={}", g3.id().hex()[..8].to_string());
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo = tx.commit("describe commit G2 -> G3").block_on().unwrap();
+    eprintln!("G3 commit={}", &g3.id().hex()[..8]);
 
     let mut tx = agent_repo.start_transaction();
     let g4 = tx
@@ -496,14 +509,18 @@ fn repro_minimal_g1_g4_g2() {
         .rewrite_commit(&g3)
         .set_description("[Slice 0] final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo_g4 = tx.commit("squash commits into G3 -> G4").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo_g4 = tx
+        .commit("squash commits into G3 -> G4")
+        .block_on()
+        .unwrap();
     let op_g4 = agent_repo_g4.operation().clone();
     eprintln!(
         "G4 op={} G4 commit={}",
-        op_g4.id().hex()[..8].to_string(),
-        g4.id().hex()[..8].to_string()
+        &op_g4.id().hex()[..8],
+        &g4.id().hex()[..8]
     );
 
     // Feed [G1, G4, G2] — intermediate G2 last.
@@ -511,12 +528,13 @@ fn repro_minimal_g1_g4_g2() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile divergent operations"))
+        .block_on()
         .unwrap();
 
     // v3 no-authoring invariant.
     assert_no_new_commits_authored(repo.loader(), &ops, &merged, "MINIMAL [G1,G4,G2]");
 
-    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
     dump_chain(&reloaded, "MINIMAL [G1,G4,G2]");
     let by_change = visible_commits_by_change(&reloaded);
     let visible = by_change.get(&change_id).map(|v| v.len()).unwrap_or(0);
@@ -556,9 +574,10 @@ fn repro_shared_wc_change_pins_both_gens() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] gamma original")
         .write()
+        .block_on()
         .unwrap();
     let slice_change = c1.change_id().clone();
-    let shared_after_c1 = tx.commit("new empty commit").unwrap();
+    let shared_after_c1 = tx.commit("new empty commit").block_on().unwrap();
 
     // 2. Create the workspace wc commit W on top of the ORIGINAL gen, on the
     //    SHARED store, so both lineages fork from a state that already has W.
@@ -568,10 +587,12 @@ fn repro_shared_wc_change_pins_both_gens() {
         .new_commit(vec![c1.id().clone()], c1.tree())
         .set_description("")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let shared_after_w = tx
         .commit("create initial working-copy commit in workspace loop-0")
+        .block_on()
         .unwrap();
     let wc_change = w.change_id().clone();
     let op_base = shared_after_w.operation().clone();
@@ -586,17 +607,19 @@ fn repro_shared_wc_change_pins_both_gens() {
     .unwrap();
     let loader_a =
         brevity::agent_repo_loader(shared_after_w.loader(), &repo_path, "agentA").unwrap();
-    let repo_a = loader_a.load_at_head().unwrap();
+    let repo_a = loader_a.load_at_head().block_on().unwrap();
     let mut tx = repo_a.start_transaction();
     let w1 = tx
         .repo_mut()
         .rewrite_commit(&w)
         .set_description("")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_lineage_a = tx
         .commit("snapshot working copy")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
@@ -612,7 +635,7 @@ fn repro_shared_wc_change_pins_both_gens() {
     .unwrap();
     let loader_b =
         brevity::agent_repo_loader(shared_after_w.loader(), &repo_path, "agentB").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
 
     // describe C1 -> G2, reparent wc W onto G2
     let mut tx = repo_b.start_transaction();
@@ -621,9 +644,10 @@ fn repro_shared_wc_change_pins_both_gens() {
         .rewrite_commit(&c1)
         .set_description("slice[0] gamma intermediate")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_b = tx.commit("describe commit C1 -> G2").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_b = tx.commit("describe commit C1 -> G2").block_on().unwrap();
 
     // describe G2 -> G3
     let g2 = repo_b.store().get_commit(g2.id()).unwrap();
@@ -633,9 +657,10 @@ fn repro_shared_wc_change_pins_both_gens() {
         .rewrite_commit(&g2)
         .set_description("slice[0] gamma intermediate 2")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_b = tx.commit("describe commit G2 -> G3").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_b = tx.commit("describe commit G2 -> G3").block_on().unwrap();
 
     // squash G3 -> G4
     let g3 = repo_b.store().get_commit(g3.id()).unwrap();
@@ -645,10 +670,12 @@ fn repro_shared_wc_change_pins_both_gens() {
         .rewrite_commit(&g3)
         .set_description("[Slice 0] gamma final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_lineage_b = tx
         .commit("squash commits into G3 -> G4")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
@@ -666,6 +693,7 @@ fn repro_shared_wc_change_pins_both_gens() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile divergent operations"))
+        .block_on()
         .unwrap();
 
     // v3.1 contract for SCENARIO C:
@@ -676,7 +704,7 @@ fn repro_shared_wc_change_pins_both_gens() {
     //      author W1' (an honest rewrite of W1) but must not author any orphan commits.
     assert_authored_commits_are_honest_rewrites(repo.loader(), &ops, &merged, "SCENARIO C");
 
-    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
     dump_chain(&reloaded, "SCENARIO C (shared wc change pins both gens)");
 
     let by_change = visible_commits_by_change(&reloaded);
@@ -729,9 +757,10 @@ fn repro_direct_nonhead_old_gen_divergence() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] original")
         .write()
+        .block_on()
         .unwrap();
     let slice_change = c1.change_id().clone();
-    let repo1 = tx.commit("new empty commit").unwrap();
+    let repo1 = tx.commit("new empty commit").block_on().unwrap();
     let op_c1 = repo1.operation().clone();
 
     // Rewrite C1 -> G4 (records the predecessor edge) and capture the op.
@@ -741,9 +770,10 @@ fn repro_direct_nonhead_old_gen_divergence() {
         .rewrite_commit(&c1)
         .set_description("[Slice 0] final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_g4 = tx.commit("squash commit C1 -> G4").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_g4 = tx.commit("squash commit C1 -> G4").block_on().unwrap();
     let op_g4 = repo_g4.operation().clone();
 
     // Now hand-build the DIVERGENT view: both C1 and G4 visible, each pinned by
@@ -756,14 +786,16 @@ fn repro_direct_nonhead_old_gen_divergence() {
         .new_commit(vec![c1.id().clone()], c1.tree())
         .set_description("wc commit (workspace loop-old)")
         .write()
+        .block_on()
         .unwrap();
     // wc child on the NEW gen G4 -> keeps G4 visible-but-not-head.
     let _w2 = mut_repo
         .new_commit(vec![g4.id().clone()], g4.tree())
         .set_description("wc commit (workspace loop-new)")
         .write()
+        .block_on()
         .unwrap();
-    mut_repo.rebase_descendants().unwrap();
+    mut_repo.rebase_descendants().block_on().unwrap();
 
     // Sanity: the slice change is divergent right now (2 visible gens, both non-head).
     {
@@ -813,8 +845,9 @@ fn repro_direct_nonhead_old_gen_divergence() {
     // v3 signature requires the debug_log parameter (None = silent).
     tx.repo_mut()
         .dedup_evolved_heads(&[op_c1, op_g4], None)
+        .block_on()
         .unwrap();
-    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().block_on().unwrap();
 
     // v3 no-authoring: rebase_descendants must be a no-op after dedup.
     assert_eq!(
@@ -916,9 +949,10 @@ fn t1_cascade_primary_mechanism() {
     let c_gen0 = create_random_commit(tx.repo_mut())
         .set_description("c-gen0")
         .write()
+        .block_on()
         .unwrap();
     let change_id = c_gen0.change_id().clone();
-    let shared_base = tx.commit("initial: c-gen0").unwrap();
+    let shared_base = tx.commit("initial: c-gen0").block_on().unwrap();
     let op_gen0 = shared_base.operation().clone();
 
     // Agent forks and produces C-gen0 -> C-gen1 -> C-gen2.
@@ -927,7 +961,7 @@ fn t1_cascade_primary_mechanism() {
         .unwrap();
     let agent_loader =
         brevity::agent_repo_loader(shared_base.loader(), &repo_path, "agent-a").unwrap();
-    let agent_repo = agent_loader.load_at_head().unwrap();
+    let agent_repo = agent_loader.load_at_head().block_on().unwrap();
 
     let mut tx = agent_repo.start_transaction();
     let c_gen1 = tx
@@ -935,9 +969,10 @@ fn t1_cascade_primary_mechanism() {
         .rewrite_commit(&c_gen0)
         .set_description("c-gen1")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo = tx.commit("rewrite gen0 -> gen1").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo = tx.commit("rewrite gen0 -> gen1").block_on().unwrap();
     let op_gen1 = agent_repo.operation().clone();
 
     let c_gen1 = agent_repo.store().get_commit(c_gen1.id()).unwrap();
@@ -947,9 +982,10 @@ fn t1_cascade_primary_mechanism() {
         .rewrite_commit(&c_gen1)
         .set_description("c-gen2 final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let agent_repo = tx.commit("rewrite gen1 -> gen2").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let agent_repo = tx.commit("rewrite gen1 -> gen2").block_on().unwrap();
     let op_gen2 = agent_repo.operation().clone();
 
     // M1 = merge of [op_gen0, op_gen2, op_gen1]: gen0 and gen1 are stale heads.
@@ -958,11 +994,12 @@ fn t1_cascade_primary_mechanism() {
     let m1 = repo
         .loader()
         .merge_operations(m1_ops.clone(), Some("reconcile R1"))
+        .block_on()
         .unwrap();
 
     assert_no_new_commits_authored(repo.loader(), &m1_ops, &m1, "T1 R1");
     {
-        let r1_repo = repo.loader().load_at(&m1).unwrap();
+        let r1_repo = repo.loader().load_at(&m1).block_on().unwrap();
         let by_change = visible_commits_by_change(&r1_repo);
         let visible = by_change.get(&change_id).map(|v| v.len()).unwrap_or(0);
         assert_eq!(
@@ -986,11 +1023,12 @@ fn t1_cascade_primary_mechanism() {
     let m2 = repo
         .loader()
         .merge_operations(m2_ops.clone(), Some("reconcile R2"))
+        .block_on()
         .unwrap();
 
     assert_no_new_commits_authored(repo.loader(), &m2_ops, &m2, "T1 R2");
     {
-        let r2_repo = repo.loader().load_at(&m2).unwrap();
+        let r2_repo = repo.loader().load_at(&m2).block_on().unwrap();
         dump_chain(&r2_repo, "T1 R2 (M1 + L2/gen0)");
         let by_change = visible_commits_by_change(&r2_repo);
         let visible = by_change.get(&change_id).map(|v| v.len()).unwrap_or(0);
@@ -1021,6 +1059,7 @@ fn t2_stacked_dual_divergence() {
     let p_old = create_random_commit(tx.repo_mut())
         .set_description("P-old")
         .write()
+        .block_on()
         .unwrap();
     let p_change = p_old.change_id().clone();
     let c_old = tx
@@ -1028,10 +1067,11 @@ fn t2_stacked_dual_divergence() {
         .new_commit(vec![p_old.id().clone()], p_old.tree())
         .set_description("C-old")
         .write()
+        .block_on()
         .unwrap();
     let c_change = c_old.change_id().clone();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let shared_base = tx.commit("initial: P-old + C-old").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let shared_base = tx.commit("initial: P-old + C-old").block_on().unwrap();
     let op_lineage_a = shared_base.operation().clone();
 
     // Lineage B: rewrites P-old -> P-new, then C-old -> C-new.
@@ -1039,7 +1079,7 @@ fn t2_stacked_dual_divergence() {
         .block_on()
         .unwrap();
     let loader_b = brevity::agent_repo_loader(shared_base.loader(), &repo_path, "agent-b").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
 
     let mut tx = repo_b.start_transaction();
     let p_new = tx
@@ -1047,9 +1087,10 @@ fn t2_stacked_dual_divergence() {
         .rewrite_commit(&p_old)
         .set_description("P-new")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_b = tx.commit("rewrite P-old -> P-new").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_b = tx.commit("rewrite P-old -> P-new").block_on().unwrap();
 
     // After rebasing descendants, C-old should have been rebased onto P-new.
     // Find the new C commit (same change_id).
@@ -1069,9 +1110,10 @@ fn t2_stacked_dual_divergence() {
         .rewrite_commit(&c_rebased)
         .set_description("C-new")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_b = tx.commit("rewrite C-rebased -> C-new").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_b = tx.commit("rewrite C-rebased -> C-new").block_on().unwrap();
     let op_lineage_b = repo_b.operation().clone();
 
     eprintln!(
@@ -1085,11 +1127,12 @@ fn t2_stacked_dual_divergence() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile stacked dual divergence"))
+        .block_on()
         .unwrap();
 
     assert_no_new_commits_authored(repo.loader(), &ops, &merged, "T2");
 
-    let merged_repo = repo.loader().load_at(&merged).unwrap();
+    let merged_repo = repo.loader().load_at(&merged).block_on().unwrap();
     dump_chain(&merged_repo, "T2 STACKED DUAL DIVERGENCE");
     let by_change = visible_commits_by_change(&merged_repo);
 
@@ -1133,9 +1176,8 @@ fn t2_stacked_dual_divergence() {
 /// Shape:
 ///   - Shared history: X-orig written, then X-new written (rewrite X-orig->X-new,
 ///     records the predecessor edge). This forms the "deep" op that is the CCA.
-///   - Two lineages fork from X-new:
-///       L1: touches something else (no X-related edges).
-///       L2: re-introduces X-orig as a bare head (stray op).
+///   - Two lineages fork from X-new. L1 touches something else (no X-related
+///     edges), while L2 re-introduces X-orig as a bare head (stray op).
 ///   - Merge [L1, L2]: X-orig and X-new are both visible. The predecessor edge
 ///     X-orig->X-new was recorded in an op that is at/below the CCA. Phase-1
 ///     misses it; phase-2 finds it. X-orig removed. 1 visible.
@@ -1152,9 +1194,10 @@ fn t3_head_inversion_deep_harvest() {
     let x_orig = create_random_commit(tx.repo_mut())
         .set_description("X-orig")
         .write()
+        .block_on()
         .unwrap();
     let x_change = x_orig.change_id().clone();
-    let repo_after_x_orig = tx.commit("X-orig").unwrap();
+    let repo_after_x_orig = tx.commit("X-orig").block_on().unwrap();
 
     let mut tx = repo_after_x_orig.start_transaction();
     let x_new = tx
@@ -1162,10 +1205,11 @@ fn t3_head_inversion_deep_harvest() {
         .rewrite_commit(&x_orig)
         .set_description("X-new")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     // This op records the X-orig -> X-new predecessor edge.
-    let shared_after_x_new = tx.commit("rewrite X-orig -> X-new").unwrap();
+    let shared_after_x_new = tx.commit("rewrite X-orig -> X-new").block_on().unwrap();
     // op_rewrite is the CCA of L1 and L2 below.
 
     // L1 fork: touches something else, no X edges.
@@ -1178,15 +1222,17 @@ fn t3_head_inversion_deep_harvest() {
     .unwrap();
     let loader_l1 =
         brevity::agent_repo_loader(shared_after_x_new.loader(), &repo_path, "l1").unwrap();
-    let repo_l1 = loader_l1.load_at_head().unwrap();
+    let repo_l1 = loader_l1.load_at_head().block_on().unwrap();
     let mut tx = repo_l1.start_transaction();
     let _other = create_random_commit(tx.repo_mut())
         .set_description("other change L1")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_l1 = tx
         .commit("L1: add other change")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
@@ -1201,15 +1247,19 @@ fn t3_head_inversion_deep_harvest() {
     .unwrap();
     let loader_l2 =
         brevity::agent_repo_loader(shared_after_x_new.loader(), &repo_path, "l2").unwrap();
-    let repo_l2 = loader_l2.load_at_head().unwrap();
+    let repo_l2 = loader_l2.load_at_head().block_on().unwrap();
     // Re-add X-orig as a head by using add_head. We do this via a transaction
     // that directly manipulates the view.
     let mut tx = repo_l2.start_transaction();
     // Get the actual x_orig commit from the store.
     let x_orig_from_store = tx.repo_mut().store().get_commit(x_orig.id()).unwrap();
-    tx.repo_mut().add_head(&x_orig_from_store).unwrap();
+    tx.repo_mut()
+        .add_head(&x_orig_from_store)
+        .block_on()
+        .unwrap();
     let op_l2 = tx
         .commit("L2: re-add X-orig as stray head")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
@@ -1229,11 +1279,12 @@ fn t3_head_inversion_deep_harvest() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile head-inversion"))
+        .block_on()
         .unwrap();
 
     assert_no_new_commits_authored(repo.loader(), &ops, &merged, "T3");
 
-    let merged_repo = repo.loader().load_at(&merged).unwrap();
+    let merged_repo = repo.loader().load_at(&merged).block_on().unwrap();
     dump_chain(&merged_repo, "T3 HEAD-INVERSION + DEEP HARVEST");
     let by_change = visible_commits_by_change(&merged_repo);
 
@@ -1268,9 +1319,10 @@ fn t4_pinned_fail_open() {
     let a_old = create_random_commit(tx.repo_mut())
         .set_description("A-old")
         .write()
+        .block_on()
         .unwrap();
     let a_change = a_old.change_id().clone();
-    let repo_after_a_old = tx.commit("A-old").unwrap();
+    let repo_after_a_old = tx.commit("A-old").block_on().unwrap();
     let op_a_old = repo_after_a_old.operation().clone();
 
     let mut tx = repo_after_a_old.start_transaction();
@@ -1279,9 +1331,10 @@ fn t4_pinned_fail_open() {
         .rewrite_commit(&a_old)
         .set_description("A-new")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_after_a_new = tx.commit("rewrite A-old -> A-new").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_after_a_new = tx.commit("rewrite A-old -> A-new").block_on().unwrap();
     let op_a_new = repo_after_a_new.operation().clone();
 
     // Hand-build: A-old is visible-but-not-head (has non-stale child CHILD).
@@ -1293,8 +1346,9 @@ fn t4_pinned_fail_open() {
         .new_commit(vec![a_old.id().clone()], a_old.tree())
         .set_description("CHILD (pins A-old, non-stale)")
         .write()
+        .block_on()
         .unwrap();
-    mut_repo.rebase_descendants().unwrap();
+    mut_repo.rebase_descendants().block_on().unwrap();
 
     // Pre-dedup: A-old and A-new should both be visible.
     let a_old_id = a_old.id().clone();
@@ -1323,8 +1377,9 @@ fn t4_pinned_fail_open() {
     // Invoke dedup.
     tx.repo_mut()
         .dedup_evolved_heads(&[op_a_old, op_a_new], None)
+        .block_on()
         .unwrap();
-    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().block_on().unwrap();
 
     // v3 no-authoring invariant: rebase_descendants must be a no-op.
     assert_eq!(
@@ -1404,9 +1459,10 @@ fn t5_wc_commit_protection() {
     let b_old = create_random_commit(tx.repo_mut())
         .set_description("B-old")
         .write()
+        .block_on()
         .unwrap();
     let b_change = b_old.change_id().clone();
-    let repo_after_b_old = tx.commit("B-old").unwrap();
+    let repo_after_b_old = tx.commit("B-old").block_on().unwrap();
     let op_b_old = repo_after_b_old.operation().clone();
 
     let mut tx = repo_after_b_old.start_transaction();
@@ -1415,9 +1471,10 @@ fn t5_wc_commit_protection() {
         .rewrite_commit(&b_old)
         .set_description("B-new")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_after_b_new = tx.commit("rewrite B-old -> B-new").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_after_b_new = tx.commit("rewrite B-old -> B-new").block_on().unwrap();
     let op_b_new = repo_after_b_new.operation().clone();
 
     // Hand-build: B-old is BOTH a view head AND a wc commit for workspace "main".
@@ -1429,7 +1486,7 @@ fn t5_wc_commit_protection() {
     // rewrite+rebase above; we explicitly re-add it to simulate a stale op
     // that brought it back).
     let b_old_commit = mut_repo.store().get_commit(b_old.id()).unwrap();
-    mut_repo.add_head(&b_old_commit).unwrap();
+    mut_repo.add_head(&b_old_commit).block_on().unwrap();
 
     // Set B-old as the workspace wc commit so the protection guard fires.
     mut_repo
@@ -1438,7 +1495,7 @@ fn t5_wc_commit_protection() {
             b_old.id().clone(),
         )
         .unwrap();
-    mut_repo.rebase_descendants().unwrap();
+    mut_repo.rebase_descendants().block_on().unwrap();
 
     // Pre-dedup: both B-old and B-new should be visible.
     let pre_b_vis = {
@@ -1466,8 +1523,9 @@ fn t5_wc_commit_protection() {
     // Invoke dedup.
     tx.repo_mut()
         .dedup_evolved_heads(&[op_b_old, op_b_new], None)
+        .block_on()
         .unwrap();
-    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().block_on().unwrap();
 
     // v3 no-authoring invariant.
     assert_eq!(
@@ -1516,17 +1574,18 @@ fn t6_mechanical_sibling_different_trees_fail_open() {
     let path_b = repo_path("file_b.txt");
 
     // Create two trees with genuinely different content.
-    let tree_a = create_tree(repo, &[(&path_a, "content from lineage A\n")]);
-    let tree_b = create_tree(repo, &[(&path_b, "content from lineage B\n")]);
+    let tree_a = create_tree(repo, &[(path_a, "content from lineage A\n")]);
+    let tree_b = create_tree(repo, &[(path_b, "content from lineage B\n")]);
 
     // Common root commit R (empty tree — predecessor origin for both siblings).
     let mut tx = repo.start_transaction();
     let root = create_random_commit(tx.repo_mut())
         .set_description("root commit — common predecessor")
         .write()
+        .block_on()
         .unwrap();
     let wc_change = root.change_id().clone();
-    let repo_after_root = tx.commit("root").unwrap();
+    let repo_after_root = tx.commit("root").block_on().unwrap();
     let op_root = repo_after_root.operation().clone();
 
     // Sibling A: rewrite root with tree_a content.
@@ -1537,9 +1596,10 @@ fn t6_mechanical_sibling_different_trees_fail_open() {
         .set_description("sibling A")
         .set_tree(tree_a)
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_sa = tx.commit("rewrite root -> sibling-A").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_sa = tx.commit("rewrite root -> sibling-A").block_on().unwrap();
     let op_a = repo_sa.operation().clone();
 
     // Sibling B: rewrite root with tree_b content (genuinely different).
@@ -1550,17 +1610,18 @@ fn t6_mechanical_sibling_different_trees_fail_open() {
         .set_description("sibling B")
         .set_tree(tree_b)
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_sb = tx.commit("rewrite root -> sibling-B").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_sb = tx.commit("rewrite root -> sibling-B").block_on().unwrap();
     let op_b = repo_sb.operation().clone();
 
     // Force-build divergent view: both sibling_a and sibling_b are view heads.
     let mut tx = repo_sb.start_transaction();
     let mut_repo: &mut MutableRepo = tx.repo_mut();
     let sa_commit = mut_repo.store().get_commit(sibling_a.id()).unwrap();
-    mut_repo.add_head(&sa_commit).unwrap();
-    mut_repo.rebase_descendants().unwrap();
+    mut_repo.add_head(&sa_commit).block_on().unwrap();
+    mut_repo.rebase_descendants().block_on().unwrap();
 
     // Confirm the trees differ at the point of dedup.
     let sa_reloaded = tx.repo().store().get_commit(sibling_a.id()).unwrap();
@@ -1601,8 +1662,9 @@ fn t6_mechanical_sibling_different_trees_fail_open() {
     let merged_ops = [op_root, op_a, op_b];
     tx.repo_mut()
         .dedup_evolved_heads(&merged_ops, None)
+        .block_on()
         .unwrap();
-    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().block_on().unwrap();
 
     // No extra authoring.
     assert_eq!(
@@ -1668,9 +1730,10 @@ fn t7_mechanical_sibling_no_wc_lex_greatest_survives() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] original")
         .write()
+        .block_on()
         .unwrap();
     let slice_change = c1.change_id().clone();
-    let repo_after_c1 = tx.commit("new empty commit").unwrap();
+    let repo_after_c1 = tx.commit("new empty commit").block_on().unwrap();
     let op_base = repo_after_c1.operation().clone();
 
     // 2. LINEAGE A: leaves C1 as-is (agent does nothing to the slice).
@@ -1683,7 +1746,7 @@ fn t7_mechanical_sibling_no_wc_lex_greatest_survives() {
     .unwrap();
     let loader_a =
         brevity::agent_repo_loader(repo_after_c1.loader(), &repo_path, "agentA-t7").unwrap();
-    let repo_a = loader_a.load_at_head().unwrap();
+    let repo_a = loader_a.load_at_head().block_on().unwrap();
     // Agent A does unrelated work; C1 remains the HEAD of its lineage.
     let op_lineage_a = repo_a.operation().clone();
 
@@ -1697,16 +1760,22 @@ fn t7_mechanical_sibling_no_wc_lex_greatest_survives() {
     .unwrap();
     let loader_b =
         brevity::agent_repo_loader(repo_after_c1.loader(), &repo_path, "agentB-t7").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
     let mut tx = repo_b.start_transaction();
     let g4 = tx
         .repo_mut()
         .rewrite_commit(&c1)
         .set_description("[Slice 0] final — squash")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let op_lineage_b = tx.commit("squash C1 -> G4").unwrap().operation().clone();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let op_lineage_b = tx
+        .commit("squash C1 -> G4")
+        .block_on()
+        .unwrap()
+        .operation()
+        .clone();
 
     eprintln!(
         "T7: slice original={} squash={}",
@@ -1723,13 +1792,14 @@ fn t7_mechanical_sibling_no_wc_lex_greatest_survives() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile T7"))
+        .block_on()
         .unwrap();
 
     // Zero authoring (strict invariant — stale-gen path never authors).
     assert_no_new_commits_authored(repo.loader(), &ops, &merged, "T7");
 
     // Exactly 1 visible slice commit.
-    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
     let by_change = visible_commits_by_change(&reloaded);
     let slice_visible = by_change.get(&slice_change).map(|v| v.len()).unwrap_or(0);
     eprintln!("T7: slice_visible={slice_visible}");
@@ -1776,6 +1846,7 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
     let c1 = create_random_commit(tx.repo_mut())
         .set_description("slice[0] original")
         .write()
+        .block_on()
         .unwrap();
     let slice_change = c1.change_id().clone();
     // Wc commit W: empty (same tree as C1, which is the empty tree).
@@ -1784,10 +1855,11 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
         .new_commit(vec![c1.id().clone()], c1.tree())
         .set_description("")
         .write()
+        .block_on()
         .unwrap();
     let wc_change = w.change_id().clone();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_shared = tx.commit("wc commit W on C1").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_shared = tx.commit("wc commit W on C1").block_on().unwrap();
     let op_base = repo_shared.operation().clone();
 
     // 2. LINEAGE A: agent writes real content to the wc → W1 (NON-EMPTY).
@@ -1800,9 +1872,9 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
     .unwrap();
     let loader_a =
         brevity::agent_repo_loader(repo_shared.loader(), &repo_dir, "agentA-t8").unwrap();
-    let repo_a = loader_a.load_at_head().unwrap();
+    let repo_a = loader_a.load_at_head().block_on().unwrap();
     let w_reloaded = repo_a.store().get_commit(w.id()).unwrap();
-    let tree_with_content = create_tree(repo, &[(&content_path, "agent wrote this\n")]);
+    let tree_with_content = create_tree(repo, &[(content_path, "agent wrote this\n")]);
     let mut tx = repo_a.start_transaction();
     let w1 = tx
         .repo_mut()
@@ -1810,20 +1882,22 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
         .set_description("")
         .set_tree(tree_with_content)
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_lineage_a = tx
         .commit("snapshot wc W → W1 (non-empty)")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
 
     // Verify W1 is non-empty.
     {
-        let repo_check = loader_a.load_at(&op_lineage_a).unwrap();
+        let repo_check = loader_a.load_at(&op_lineage_a).block_on().unwrap();
         let w1_check = repo_check.store().get_commit(w1.id()).unwrap();
         assert!(
-            !w1_check.is_empty(&*repo_check).unwrap_or(true),
+            !w1_check.is_empty(&*repo_check).block_on().unwrap_or(true),
             "T8 setup: W1 must be non-empty"
         );
     }
@@ -1839,7 +1913,7 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
     .unwrap();
     let loader_b =
         brevity::agent_repo_loader(repo_shared.loader(), &repo_dir, "agentB-t8").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
     let c1_b = repo_b.store().get_commit(c1.id()).unwrap();
     let mut tx = repo_b.start_transaction();
     let g4 = tx
@@ -1847,9 +1921,15 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
         .rewrite_commit(&c1_b)
         .set_description("[Slice 0] final")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let op_lineage_b = tx.commit("squash C1 → G4").unwrap().operation().clone();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let op_lineage_b = tx
+        .commit("squash C1 → G4")
+        .block_on()
+        .unwrap()
+        .operation()
+        .clone();
 
     eprintln!(
         "T8: slice={} -> {} ; wc_orig={}",
@@ -1865,12 +1945,13 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile T8"))
+        .block_on()
         .unwrap();
 
     // No authoring constraint: only HONEST rewrites (W1'→W1 chain) are allowed.
     assert_authored_commits_are_honest_rewrites(repo.loader(), &ops, &merged, "T8");
 
-    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
     dump_chain(&reloaded, "T8 (empty-vs-nonempty wc siblings)");
 
     let by_change = visible_commits_by_change(&reloaded);
@@ -1889,7 +1970,10 @@ fn t8_empty_vs_nonempty_sibling_empty_hidden_nonempty_kept() {
     let surviving_wc_id = &by_change[&wc_change][0];
     let surviving_commit = reloaded.store().get_commit(surviving_wc_id).unwrap();
     assert!(
-        !surviving_commit.is_empty(&*reloaded).unwrap_or(true),
+        !surviving_commit
+            .is_empty(&*reloaded)
+            .block_on()
+            .unwrap_or(true),
         "T8: the surviving wc commit must be non-empty (the content-bearing one); got empty"
     );
 
@@ -1922,13 +2006,14 @@ fn t9_empty_sibling_is_wc_referenced_fail_open() {
     let base = create_random_commit(tx.repo_mut())
         .set_description("base")
         .write()
+        .block_on()
         .unwrap();
     let wc_change = base.change_id().clone();
-    let repo_base = tx.commit("base").unwrap();
+    let repo_base = tx.commit("base").block_on().unwrap();
     let op_base = repo_base.operation().clone();
 
     // Non-empty rewrite.
-    let tree_ne = create_tree(repo, &[(&content_path, "real content\n")]);
+    let tree_ne = create_tree(repo, &[(content_path, "real content\n")]);
     let mut tx = repo_base.start_transaction();
     let nonempty_commit = tx
         .repo_mut()
@@ -1936,9 +2021,10 @@ fn t9_empty_sibling_is_wc_referenced_fail_open() {
         .set_description("")
         .set_tree(tree_ne)
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_ne = tx.commit("non-empty rewrite").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_ne = tx.commit("non-empty rewrite").block_on().unwrap();
     let op_ne = repo_ne.operation().clone();
 
     // Empty rewrite (same tree as base — provably empty).
@@ -1948,9 +2034,10 @@ fn t9_empty_sibling_is_wc_referenced_fail_open() {
         .rewrite_commit(&base)
         .set_description("")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let repo_em = tx.commit("empty rewrite").unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let repo_em = tx.commit("empty rewrite").block_on().unwrap();
     let op_em = repo_em.operation().clone();
 
     // Hand-build divergent view: both nonempty_commit and empty_commit are heads.
@@ -1958,14 +2045,14 @@ fn t9_empty_sibling_is_wc_referenced_fail_open() {
     let mut tx = repo_em.start_transaction();
     let mut_repo: &mut MutableRepo = tx.repo_mut();
     let ne_commit = mut_repo.store().get_commit(nonempty_commit.id()).unwrap();
-    mut_repo.add_head(&ne_commit).unwrap();
+    mut_repo.add_head(&ne_commit).block_on().unwrap();
     mut_repo
         .set_wc_commit(
             jj_lib::ref_name::WorkspaceNameBuf::from("test-wc"),
             empty_commit.id().clone(),
         )
         .unwrap();
-    mut_repo.rebase_descendants().unwrap();
+    mut_repo.rebase_descendants().block_on().unwrap();
 
     // Pre-dedup: both visible.
     let pre_vis = {
@@ -1998,8 +2085,9 @@ fn t9_empty_sibling_is_wc_referenced_fail_open() {
     let merged_ops = [op_base, op_ne, op_em];
     tx.repo_mut()
         .dedup_evolved_heads(&merged_ops, None)
+        .block_on()
         .unwrap();
-    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().block_on().unwrap();
 
     // No authoring.
     assert_eq!(
@@ -2067,13 +2155,14 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
     let base = create_random_commit(tx.repo_mut())
         .set_description("base")
         .write()
+        .block_on()
         .unwrap();
     let wc_change = base.change_id().clone();
-    let repo_base = tx.commit("base").unwrap();
+    let repo_base = tx.commit("base").block_on().unwrap();
     let op_base = repo_base.operation().clone();
 
     // Lineage A: rewrite base with tree_a content.
-    let tree_a = create_tree(repo, &[(&path_a, "content from A\n")]);
+    let tree_a = create_tree(repo, &[(path_a, "content from A\n")]);
     brevity::fork_agent_oplog(
         &repo_path_buf,
         "agentA-t10",
@@ -2083,7 +2172,7 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
     .unwrap();
     let loader_a =
         brevity::agent_repo_loader(repo_base.loader(), &repo_path_buf, "agentA-t10").unwrap();
-    let repo_a = loader_a.load_at_head().unwrap();
+    let repo_a = loader_a.load_at_head().block_on().unwrap();
     let base_a = repo_a.store().get_commit(base.id()).unwrap();
     let mut tx = repo_a.start_transaction();
     let _sibling_a = tx
@@ -2092,16 +2181,18 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
         .set_description("")
         .set_tree(tree_a)
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_a = tx
         .commit("rewrite base → content-A")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
 
     // Lineage B: rewrite base with tree_b content (different).
-    let tree_b = create_tree(repo, &[(&path_b, "content from B\n")]);
+    let tree_b = create_tree(repo, &[(path_b, "content from B\n")]);
     brevity::fork_agent_oplog(
         &repo_path_buf,
         "agentB-t10",
@@ -2111,7 +2202,7 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
     .unwrap();
     let loader_b =
         brevity::agent_repo_loader(repo_base.loader(), &repo_path_buf, "agentB-t10").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
     let base_b = repo_b.store().get_commit(base.id()).unwrap();
     let mut tx = repo_b.start_transaction();
     let _sibling_b = tx
@@ -2120,10 +2211,12 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
         .set_description("")
         .set_tree(tree_b)
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_b = tx
         .commit("rewrite base → content-B")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
@@ -2133,9 +2226,10 @@ fn t10_both_nonempty_different_trees_still_fail_open() {
     let merged = repo
         .loader()
         .merge_operations(ops.clone(), Some("reconcile T10"))
+        .block_on()
         .unwrap();
 
-    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
     let by_change = visible_commits_by_change(&reloaded);
     let wc_visible = by_change.get(&wc_change).map(|v| v.len()).unwrap_or(0);
     eprintln!("T10: wc_visible={wc_visible}");
@@ -2178,9 +2272,10 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
         .new_commit(vec![root_id.clone()], root_commit.tree())
         .set_description("pre-create placeholder R")
         .write()
+        .block_on()
         .unwrap();
     let target_change = r.change_id().clone();
-    let repo_r = tx.commit("create R").unwrap();
+    let repo_r = tx.commit("create R").block_on().unwrap();
     let op_r = repo_r.operation().clone();
 
     // 2. LINEAGE A (wave pre-create): rewrites R with same empty tree, different desc.
@@ -2189,7 +2284,7 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
         .block_on()
         .unwrap();
     let loader_a = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-a-t11").unwrap();
-    let repo_a = loader_a.load_at_head().unwrap();
+    let repo_a = loader_a.load_at_head().block_on().unwrap();
     let r_in_a = repo_a.store().get_commit(r.id()).unwrap();
     let mut tx = repo_a.start_transaction();
     let e_a = tx
@@ -2197,9 +2292,15 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
         .rewrite_commit(&r_in_a)
         .set_description("slice[3] beta-placeholder")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
-    let op_a = tx.commit("pre-create empty").unwrap().operation().clone();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
+    let op_a = tx
+        .commit("pre-create empty")
+        .block_on()
+        .unwrap()
+        .operation()
+        .clone();
 
     // 3. LINEAGE B (loop task-describe): rewrites R with same empty tree, different
     //    desc — independently, no knowledge of E_a. Produces E_b: same change_id,
@@ -2208,7 +2309,7 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
         .block_on()
         .unwrap();
     let loader_b = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-b-t11").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
     let r_in_b = repo_b.store().get_commit(r.id()).unwrap();
     let mut tx = repo_b.start_transaction();
     let e_b = tx
@@ -2216,24 +2317,27 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
         .rewrite_commit(&r_in_b)
         .set_description("[Slice 3] beta-loop-describe")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_b = tx
         .commit("loop-describe empty")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
 
     // Verify both E_a and E_b are empty.
     {
-        let check_a = loader_a.load_at(&op_a).unwrap();
-        let check_b = loader_b.load_at(&op_b).unwrap();
+        let check_a = loader_a.load_at(&op_a).block_on().unwrap();
+        let check_b = loader_b.load_at(&op_b).block_on().unwrap();
         assert!(
             check_a
                 .store()
                 .get_commit(e_a.id())
                 .unwrap()
                 .is_empty(&*check_a)
+                .block_on()
                 .unwrap_or(false),
             "T11 setup: E_a must be empty"
         );
@@ -2243,6 +2347,7 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
                 .get_commit(e_b.id())
                 .unwrap()
                 .is_empty(&*check_b)
+                .block_on()
                 .unwrap_or(false),
             "T11 setup: E_b must be empty"
         );
@@ -2255,18 +2360,36 @@ fn t11_both_empty_no_predecessor_edges_two_writer() {
         &target_change.reverse_hex()[..8]
     );
 
-    // Reconcile: [op_r, op_a, op_b]. E_a and E_b are siblings of target_change.
-    // v3.3 must remove the lex-smaller and keep exactly 1 visible, no authoring.
+    // A generic reconciliation must preserve the honest description divergence.
     let ops = vec![op_r, op_a, op_b];
+    let generic_merged = repo
+        .loader()
+        .merge_operations(ops.clone(), Some("generic reconcile T11"))
+        .block_on()
+        .unwrap();
+    let generic_reloaded = repo.loader().load_at(&generic_merged).block_on().unwrap();
+    let generic_by_change = visible_commits_by_change(&generic_reloaded);
+    let generic_visible = generic_by_change
+        .get(&target_change)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(
+        generic_visible, 2,
+        "T11: generic reconciliation must preserve honest empty-commit divergence"
+    );
+
+    // The isolated-agent policy may collapse the known two-writer placeholder
+    // shape. It removes the lex-smaller and keeps exactly 1 visible, no authoring.
     let merged = repo
         .loader()
-        .merge_operations(ops.clone(), Some("reconcile T11"))
+        .merge_agent_operations(ops.clone(), Some("agent reconcile T11"))
+        .block_on()
         .unwrap();
 
     // Only honest rewrites allowed.
     assert_authored_commits_are_honest_rewrites(repo.loader(), &ops, &merged, "T11");
 
-    let reloaded = repo.loader().load_at(&merged).unwrap();
+    let reloaded = repo.loader().load_at(&merged).block_on().unwrap();
     let by_change = visible_commits_by_change(&reloaded);
     let visible = by_change.get(&target_change).map(|v| v.len()).unwrap_or(0);
     eprintln!("T11: target_change visible={visible}");
@@ -2318,9 +2441,10 @@ fn t12_both_empty_wc_referenced_member_survives() {
         .new_commit(vec![root_id_t12.clone()], root_commit_t12.tree())
         .set_description("base R for T12")
         .write()
+        .block_on()
         .unwrap();
     let target_change = r.change_id().clone();
-    let repo_r = tx.commit("create R T12").unwrap();
+    let repo_r = tx.commit("create R T12").block_on().unwrap();
     let op_r = repo_r.operation().clone();
 
     // 2. Lineage A: rewrites R → E_a (empty, predecessor = R).
@@ -2328,7 +2452,7 @@ fn t12_both_empty_wc_referenced_member_survives() {
         .block_on()
         .unwrap();
     let loader_a = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-a-t12").unwrap();
-    let repo_a = loader_a.load_at_head().unwrap();
+    let repo_a = loader_a.load_at_head().block_on().unwrap();
     let r_in_a = repo_a.store().get_commit(r.id()).unwrap();
     let mut tx = repo_a.start_transaction();
     let e_a = tx
@@ -2336,10 +2460,12 @@ fn t12_both_empty_wc_referenced_member_survives() {
         .rewrite_commit(&r_in_a)
         .set_description("slice placeholder A-t12")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_a = tx
         .commit("lineage-A empty T12")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
@@ -2350,7 +2476,7 @@ fn t12_both_empty_wc_referenced_member_survives() {
         .block_on()
         .unwrap();
     let loader_b = brevity::agent_repo_loader(repo_r.loader(), &repo_dir, "writer-b-t12").unwrap();
-    let repo_b = loader_b.load_at_head().unwrap();
+    let repo_b = loader_b.load_at_head().block_on().unwrap();
     let r_in_b = repo_b.store().get_commit(r.id()).unwrap();
     let mut tx = repo_b.start_transaction();
     let e_b = tx
@@ -2358,24 +2484,27 @@ fn t12_both_empty_wc_referenced_member_survives() {
         .rewrite_commit(&r_in_b)
         .set_description("[Slice] placeholder B-t12")
         .write()
+        .block_on()
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
     let op_b = tx
         .commit("lineage-B empty T12")
+        .block_on()
         .unwrap()
         .operation()
         .clone();
 
     // Verify both are empty.
     {
-        let check_a = loader_a.load_at(&op_a).unwrap();
-        let check_b = loader_b.load_at(&op_b).unwrap();
+        let check_a = loader_a.load_at(&op_a).block_on().unwrap();
+        let check_b = loader_b.load_at(&op_b).block_on().unwrap();
         assert!(
             check_a
                 .store()
                 .get_commit(e_a.id())
                 .unwrap()
                 .is_empty(&*check_a)
+                .block_on()
                 .unwrap_or(false),
             "T12 setup: E_a must be empty"
         );
@@ -2385,6 +2514,7 @@ fn t12_both_empty_wc_referenced_member_survives() {
                 .get_commit(e_b.id())
                 .unwrap()
                 .is_empty(&*check_b)
+                .block_on()
                 .unwrap_or(false),
             "T12 setup: E_b must be empty"
         );
@@ -2393,12 +2523,12 @@ fn t12_both_empty_wc_referenced_member_survives() {
     // 4. Build a merged view that sees both E_a and E_b as heads, with E_b
     //    registered as the wc commit. Then call dedup_evolved_heads directly.
     //    We use a fresh transaction on repo_b's snapshot (which has E_b as head).
-    let repo_b_snap = loader_b.load_at(&op_b).unwrap();
+    let repo_b_snap = loader_b.load_at(&op_b).block_on().unwrap();
     let mut tx = repo_b_snap.start_transaction();
     // E_a was hidden by the lineage-B rewrite in its own oplog; force it back
     // into the view so we see both siblings.
     let e_a_commit = tx.repo_mut().store().get_commit(e_a.id()).unwrap();
-    tx.repo_mut().add_head(&e_a_commit).unwrap();
+    tx.repo_mut().add_head(&e_a_commit).block_on().unwrap();
     // Register E_b as the wc commit.
     tx.repo_mut()
         .set_wc_commit(
@@ -2406,7 +2536,7 @@ fn t12_both_empty_wc_referenced_member_survives() {
             e_b.id().clone(),
         )
         .unwrap();
-    tx.repo_mut().rebase_descendants().unwrap();
+    tx.repo_mut().rebase_descendants().block_on().unwrap();
 
     // Pre-dedup sanity: both must appear as view heads (or ancestors).
     let pre_heads: Vec<CommitId> = tx.repo().view().heads().iter().cloned().collect();
@@ -2429,9 +2559,10 @@ fn t12_both_empty_wc_referenced_member_survives() {
     // Invoke dedup: E_b is wc-referenced → it must survive; E_a must be removed.
     let merged_ops = [op_r.clone(), op_a.clone(), op_b.clone()];
     tx.repo_mut()
-        .dedup_evolved_heads(&merged_ops, None)
+        .dedup_agent_evolved_heads(&merged_ops, None)
+        .block_on()
         .unwrap();
-    let rebased = tx.repo_mut().rebase_descendants().unwrap();
+    let rebased = tx.repo_mut().rebase_descendants().block_on().unwrap();
     assert_eq!(rebased, 0, "T12: dedup must not author commits");
 
     // Post-dedup: exactly 1 visible with target_change, must be E_b.

@@ -53,6 +53,7 @@ use crate::default_index::DefaultMutableIndex;
 use crate::default_submodule_store::DefaultSubmoduleStore;
 use crate::file_util::IoResultExt as _;
 use crate::file_util::PathError;
+use crate::forked_op_heads_store::ForkedOpHeadsStore;
 use crate::index::ChangeIdIndex;
 use crate::index::Index;
 use crate::index::IndexError;
@@ -107,7 +108,6 @@ use crate::settings::UserSettings;
 use crate::signing::SignInitError;
 use crate::signing::Signer;
 use crate::simple_backend::SimpleBackend;
-use crate::forked_op_heads_store::ForkedOpHeadsStore;
 use crate::simple_op_heads_store::SimpleOpHeadsStore;
 use crate::simple_op_store::SimpleOpStore;
 use crate::store::Store;
@@ -676,9 +676,7 @@ pub enum RepoLoaderError {
     TransactionCommit(#[from] TransactionCommitError),
     #[error("Operation heads are missing; select a known operation explicitly with --at-op <id>")]
     OpHeadsMissing,
-    #[error(
-        "Operation heads are divergent ({heads:?}); select one explicitly with --at-op <id>"
-    )]
+    #[error("Operation heads are divergent ({heads:?}); select one explicitly with --at-op <id>")]
     OpHeadsDivergent { heads: Vec<OperationId> },
 }
 
@@ -736,9 +734,8 @@ impl RepoLoader {
             &repo_path.join("op_store"),
             root_op_data,
         )?);
-        let op_heads_store = Arc::from(
-            store_factories.load_op_heads_store(settings, &repo_path.join("op_heads"))?,
-        );
+        let op_heads_store =
+            Arc::from(store_factories.load_op_heads_store(settings, &repo_path.join("op_heads"))?);
         let index_store =
             Arc::from(store_factories.load_index_store(settings, &repo_path.join("index"))?);
         let submodule_store = Arc::from(
@@ -871,6 +868,31 @@ impl RepoLoader {
         operations: Vec<Operation>,
         tx_description: Option<&str>,
     ) -> Result<Operation, RepoLoaderError> {
+        self.merge_operations_with_policy(operations, tx_description, false)
+            .await
+    }
+
+    /// Merges operations produced by explicitly isolated agent op logs.
+    ///
+    /// Unlike [`Self::merge_operations`], this permits deterministic collapse
+    /// of content-empty sibling placeholders even when no merge-authored
+    /// predecessor proves their relationship. Callers must establish the
+    /// isolated-agent provenance before selecting this policy.
+    pub async fn merge_agent_operations(
+        &self,
+        operations: Vec<Operation>,
+        tx_description: Option<&str>,
+    ) -> Result<Operation, RepoLoaderError> {
+        self.merge_operations_with_policy(operations, tx_description, true)
+            .await
+    }
+
+    async fn merge_operations_with_policy(
+        &self,
+        operations: Vec<Operation>,
+        tx_description: Option<&str>,
+        allow_unproven_empty_siblings: bool,
+    ) -> Result<Operation, RepoLoaderError> {
         use crate::object_id::ObjectId as _;
         let num_operations = operations.len();
         let mut operations = operations.into_iter();
@@ -912,7 +934,12 @@ impl RepoLoader {
             // rebase_descendants is a no-op unless some other code path added
             // rewrites; we log loudly if it does anything.
             tx.repo_mut()
-                .dedup_evolved_heads(&all_ops, debug_log.as_deref())?;
+                .dedup_evolved_heads_with_policy(
+                    &all_ops,
+                    debug_log.as_deref(),
+                    allow_unproven_empty_siblings,
+                )
+                .await?;
             let rebased = tx.repo_mut().rebase_descendants().await?;
             if rebased > 0
                 && let Some(ref log) = debug_log
@@ -1078,16 +1105,16 @@ enum HarvestResult {
 /// DAG. If `stop_at` is `Some(id)`, the op with that id and all ops below it
 /// are excluded (CCA-bounded harvest). Returns `CapExceeded` if `max_ops` is
 /// reached so the caller can fail open.
-fn harvest_predecessor_edges(
+async fn harvest_predecessor_edges(
     merged_ops: &[Operation],
-    stop_at: Option<&OperationId>,
+    stop_at: &HashSet<OperationId>,
     max_ops: usize,
 ) -> BackendResult<HarvestResult> {
     let mut preds: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
     let mut seen_ops: HashSet<OperationId> = HashSet::new();
     let mut op_stack: Vec<Operation> = merged_ops.to_vec();
     while let Some(op) = op_stack.pop() {
-        if stop_at.is_some() && Some(op.id()) == stop_at {
+        if stop_at.contains(op.id()) {
             continue;
         }
         if !seen_ops.insert(op.id().clone()) {
@@ -1104,9 +1131,11 @@ fn harvest_predecessor_edges(
                     .extend(old_ids.iter().cloned());
             }
         }
-        for parent in op.parents() {
-            op_stack.push(parent.map_err(|err| BackendError::Other(err.into()))?);
-        }
+        let parents = op
+            .parents()
+            .await
+            .map_err(|err| BackendError::Other(err.into()))?;
+        op_stack.extend(parents);
     }
     Ok(HarvestResult::Edges(preds))
 }
@@ -2255,10 +2284,31 @@ impl MutableRepo {
     ///
     /// For stale commits pinned by a non-stale visible descendant (including wc
     /// commits), we fail open — dedup is idempotent, a later reconcile finishes.
-    pub fn dedup_evolved_heads(
+    pub async fn dedup_evolved_heads(
         &mut self,
         merged_ops: &[Operation],
         debug_log: Option<&(dyn Fn(&str) + Send + Sync)>,
+    ) -> BackendResult<()> {
+        self.dedup_evolved_heads_with_policy(merged_ops, debug_log, false)
+            .await
+    }
+
+    /// Deduplicates evolved heads for operations whose isolated-agent
+    /// provenance has already been established by the caller.
+    pub async fn dedup_agent_evolved_heads(
+        &mut self,
+        merged_ops: &[Operation],
+        debug_log: Option<&(dyn Fn(&str) + Send + Sync)>,
+    ) -> BackendResult<()> {
+        self.dedup_evolved_heads_with_policy(merged_ops, debug_log, true)
+            .await
+    }
+
+    async fn dedup_evolved_heads_with_policy(
+        &mut self,
+        merged_ops: &[Operation],
+        debug_log: Option<&(dyn Fn(&str) + Send + Sync)>,
+        allow_unproven_empty_siblings: bool,
     ) -> BackendResult<()> {
         use crate::object_id::ObjectId as _;
 
@@ -2340,23 +2390,23 @@ impl MutableRepo {
         const MAX_HARVEST_OPS: usize = 10_000;
 
         // 1. Phase-1 harvest: bounded by the merge cone's CCA (cheap, common case).
-        let mut common_ancestor: Option<Operation> = None;
+        let mut common_ancestors: Vec<Operation> = Vec::new();
         for op in merged_ops {
-            common_ancestor = match common_ancestor {
-                None => Some(op.clone()),
-                Some(ca) => dag_walk::closest_common_node_ok(
-                    [Ok::<_, OpStoreError>(ca)],
-                    [Ok::<_, OpStoreError>(op.clone())],
-                    |op: &Operation| op.id().clone(),
-                    |op: &Operation| op.parents().collect_vec(),
-                )
-                .map_err(|err| BackendError::Other(err.into()))?,
+            common_ancestors = if common_ancestors.is_empty() {
+                vec![op.clone()]
+            } else {
+                crate::op_walk::closest_common_ancestors(common_ancestors, [op.clone()])
+                    .await
+                    .map_err(|err| BackendError::Other(err.into()))?
             };
         }
-        let stop_at: Option<OperationId> = common_ancestor.map(|op| op.id().clone());
+        let stop_at: HashSet<OperationId> = common_ancestors
+            .into_iter()
+            .map(|op| op.id().clone())
+            .collect();
 
         let phase1_preds =
-            match harvest_predecessor_edges(merged_ops, stop_at.as_ref(), MAX_HARVEST_OPS)? {
+            match harvest_predecessor_edges(merged_ops, &stop_at, MAX_HARVEST_OPS).await? {
                 HarvestResult::Edges(p) => p,
                 HarvestResult::CapExceeded => {
                     if let Some(log) = debug_log {
@@ -2398,7 +2448,7 @@ impl MutableRepo {
                 ));
             }
             // Unbounded: pass stop_at=None.
-            match harvest_predecessor_edges(merged_ops, None, MAX_HARVEST_OPS)? {
+            match harvest_predecessor_edges(merged_ops, &HashSet::new(), MAX_HARVEST_OPS).await? {
                 HarvestResult::Edges(p) => Some(p),
                 HarvestResult::CapExceeded => None, // cap exceeded, fall through with phase1 only
             }
@@ -2527,7 +2577,8 @@ impl MutableRepo {
                 let mut walk_failed = false;
                 match revset::walk_revs(self, slice::from_ref(candidate), &remaining_heads) {
                     Ok(revset) => {
-                        for item in revset.iter() {
+                        let mut stream = revset.stream();
+                        while let Some(item) = stream.next().await {
                             match item {
                                 Ok(id) => exclusive.push(id),
                                 Err(_) => {
@@ -2681,44 +2732,33 @@ impl MutableRepo {
             // selection. Fail-open on Repo errors (treat as non-empty).
             // Two-step to avoid overlapping borrows: fetch commits first, then
             // call is_empty with &*self (an immutable re-borrow of &mut self).
-            let member_empty: HashMap<&CommitId, bool> = {
-                let commits: Vec<(&CommitId, Commit)> = group
-                    .iter()
-                    .filter_map(|id| {
-                        let commit = self.store().get_commit(id).ok()?;
-                        Some((id, commit))
-                    })
-                    .collect();
-                commits
-                    .into_iter()
-                    .map(|(id, commit)| {
-                        let empty = commit.is_empty(&*self).unwrap_or(false);
-                        (id, empty)
-                    })
-                    .collect()
-            };
+            let mut member_empty: HashMap<&CommitId, bool> = HashMap::new();
+            for id in group {
+                if let Ok(commit) = self.store().get_commit(id) {
+                    let empty = commit.is_empty(&*self).await.unwrap_or(false);
+                    member_empty.insert(id, empty);
+                }
+            }
 
             // Guard (c) pre-check: group-level discriminant.
             //   • For non-empty candidate paths: require at least one merge-authored
             //     member (definitive discriminant vs genuine concurrent divergence).
-            //   • For the empty-candidate path: NO predecessor proof required.
-            //     Emptiness alone proves losslessness — a commit that adds nothing over
-            //     its parents cannot carry content that would be lost. The two-writer
-            //     shape (wave pre-create + loop task-describe, both producing empty
-            //     commits with no predecessor edge between them) must also be handled,
-            //     so the empty path explicitly does NOT require any_merge_authored or
-            //     any_non_empty. Guards (a) + (b)-empty + (d) are sufficient.
+            //   • For the empty-candidate path: predecessor proof may be relaxed only
+            //     for the explicit isolated-agent policy. A generic jj reconciliation
+            //     must preserve honest divergent descriptions even when both commits
+            //     are content-empty.
             let any_merge_authored = group.iter().any(|id| merge_authored_ids.contains(id));
             let any_empty_non_wc = group
                 .iter()
                 .any(|id| *member_empty.get(id).unwrap_or(&false) && !wc_ids.contains(id));
 
             // Skip the group entirely if neither path applies.
-            if !(any_merge_authored || any_empty_non_wc) {
+            let allow_empty_without_merge_proof = allow_unproven_empty_siblings && any_empty_non_wc;
+            if !(any_merge_authored || allow_empty_without_merge_proof) {
                 if let Some(log) = debug_log {
                     log(&format!(
                         "[dedup_evolved_heads] mechanical-sibling group for change {} has no \
-                         merge-authored member and no removable empty sibling — skipping",
+                         merge-authored member and no proven agent-placeholder path — skipping",
                         group
                             .first()
                             .and_then(|id| self.store().get_commit(id).ok())
@@ -2751,9 +2791,8 @@ impl MutableRepo {
                 continue;
             };
 
-            let survivor = match self.store().get_commit(&survivor_id) {
-                Ok(c) => c,
-                Err(_) => continue,
+            let Ok(survivor) = self.store().get_commit(&survivor_id) else {
+                continue;
             };
 
             // Determine candidates for removal (non-survivor members).
@@ -2778,9 +2817,8 @@ impl MutableRepo {
                     continue;
                 }
 
-                let member = match self.store().get_commit(member_id) {
-                    Ok(c) => c,
-                    Err(_) => continue,
+                let Ok(member) = self.store().get_commit(member_id) else {
+                    continue;
                 };
 
                 let member_is_empty = *member_empty.get(member_id).unwrap_or(&false);
@@ -2806,7 +2844,7 @@ impl MutableRepo {
                 // Guard (c) per-member: for non-empty tree-identical members, require
                 // the group to have a merge-authored member (checked at group level).
                 // For empty members the relaxed path is already gated at group level
-                // (any_empty_non_wc && any_non_empty). No per-member recheck needed.
+                // by the explicit isolated-agent policy. No per-member recheck needed.
                 // Mark which candidates are on the empty path for logging.
                 if member_is_empty {
                     empty_removals.insert(member_id.clone());
@@ -2845,7 +2883,8 @@ impl MutableRepo {
                 match revset::walk_revs(self, slice::from_ref(candidate), &remaining_after_siblings)
                 {
                     Ok(revset) => {
-                        for item in revset.iter() {
+                        let mut stream = revset.stream();
+                        while let Some(item) = stream.next().await {
                             match item {
                                 Ok(id) => exclusive.push(id),
                                 Err(_) => {

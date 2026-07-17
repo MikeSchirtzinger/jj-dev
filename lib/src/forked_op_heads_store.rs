@@ -91,15 +91,19 @@ impl ForkedOpHeadsStore {
     /// file so that `merge_back` can compute correct merge ancestry.
     ///
     /// # Errors
-    /// Returns an error if `agent_op_heads_dir` already exists or if any
-    /// filesystem operation fails.
+    /// Returns an error if the private store has already been initialized or if
+    /// any filesystem operation fails.
     pub fn fork_from(
         parent: &dyn OpHeadsStore,
         fork_op_id: OperationId,
         agent_op_heads_dir: &Path,
     ) -> Result<Self, OpHeadsStoreError> {
         // Initialize the private store — this creates `agent_op_heads_dir/heads/`.
-        let private = SimpleOpHeadsStore::init(agent_op_heads_dir)
+        std::fs::create_dir_all(agent_op_heads_dir).map_err(|source| OpHeadsStoreError::Write {
+            new_op_id: fork_op_id.clone(),
+            source: source.into(),
+        })?;
+        let private = SimpleOpHeadsStore::init(agent_op_heads_dir, &fork_op_id)
             .map_err(|e| OpHeadsStoreError::Read(e.into()))?;
 
         // Copy current parent heads into the private store.
@@ -205,8 +209,8 @@ mod tests {
         let agent_dir = tempfile::tempdir().unwrap();
 
         // Create a parent store with one head.
-        let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
         let op_id = make_op_id("aabbccdd00000000000000000000000000000000000000000000000000000000");
+        let parent = SimpleOpHeadsStore::init(parent_dir.path(), &op_id).unwrap();
         parent.update_op_heads(&[], &op_id).block_on().unwrap();
 
         // Fork from the parent.
@@ -227,9 +231,9 @@ mod tests {
         let parent_dir = tempfile::tempdir().unwrap();
         let agent_dir = tempfile::tempdir().unwrap();
 
-        let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
         let base_id =
             make_op_id("aabbccdd00000000000000000000000000000000000000000000000000000000");
+        let parent = SimpleOpHeadsStore::init(parent_dir.path(), &base_id).unwrap();
         parent.update_op_heads(&[], &base_id).block_on().unwrap();
 
         let forked =
@@ -256,8 +260,8 @@ mod tests {
         let agent_dir = tempfile::tempdir().unwrap();
         let parent_dir = tempfile::tempdir().unwrap();
 
-        let parent = SimpleOpHeadsStore::init(parent_dir.path()).unwrap();
         let op_id = make_op_id("deadbeef00000000000000000000000000000000000000000000000000000000");
+        let parent = SimpleOpHeadsStore::init(parent_dir.path(), &op_id).unwrap();
         parent.update_op_heads(&[], &op_id).block_on().unwrap();
 
         // Create fork.

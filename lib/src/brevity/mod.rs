@@ -59,6 +59,10 @@ pub enum BrevityError {
     NotFound(String),
     #[error("Invalid agent name: {0}")]
     InvalidName(String),
+    #[error("Invalid repository path: {0}")]
+    InvalidRepoPath(String),
+    #[error("Operation heads store returned no heads")]
+    NoHeads,
     #[error("Failed to fork agent oplog")]
     Fork(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("IO error")]
@@ -87,7 +91,12 @@ fn validate_agent_name(name: &str) -> Result<(), BrevityError> {
             "agent name contains invalid characters: {name}"
         )));
     }
-    if !name.chars().next().unwrap().is_ascii_alphanumeric() {
+    let Some(first) = name.chars().next() else {
+        return Err(BrevityError::InvalidName(
+            "agent name must not be empty".into(),
+        ));
+    };
+    if !first.is_ascii_alphanumeric() {
         return Err(BrevityError::InvalidName(format!(
             "agent name must start with alphanumeric character: {name}"
         )));
@@ -98,18 +107,18 @@ fn validate_agent_name(name: &str) -> Result<(), BrevityError> {
 /// Root directory for all agent oplogs: `.jj/agent-oplogs/`.
 ///
 /// `repo_path` is the `.jj/repo` directory.
-fn agent_oplogs_dir(repo_path: &Path) -> PathBuf {
-    repo_path
+fn agent_oplogs_dir(repo_path: &Path) -> Result<PathBuf, BrevityError> {
+    let jj_dir = repo_path
         .parent()
-        .expect("repo_path should have a parent (.jj)")
-        .join("agent-oplogs")
+        .ok_or_else(|| BrevityError::InvalidRepoPath(repo_path.display().to_string()))?;
+    Ok(jj_dir.join("agent-oplogs"))
 }
 
 /// Path to a specific agent's `op_heads` directory.
-fn agent_op_heads_path(repo_path: &Path, agent_name: &str) -> PathBuf {
-    agent_oplogs_dir(repo_path)
+fn agent_op_heads_path(repo_path: &Path, agent_name: &str) -> Result<PathBuf, BrevityError> {
+    Ok(agent_oplogs_dir(repo_path)?
         .join(agent_name)
-        .join("op_heads")
+        .join("op_heads"))
 }
 
 /// Fork current op heads into a per-agent private store.
@@ -124,13 +133,14 @@ pub async fn fork_agent_oplog(
 ) -> Result<ForkedOpHeadsStore, BrevityError> {
     validate_agent_name(agent_name)?;
 
-    let agent_dir = agent_oplogs_dir(repo_path).join(agent_name);
+    let agent_oplogs_dir = agent_oplogs_dir(repo_path)?;
+    let agent_dir = agent_oplogs_dir.join(agent_name);
     if agent_dir.exists() {
         return Err(BrevityError::AlreadyExists(agent_name.to_string()));
     }
 
     // Create parent directories
-    fs::create_dir_all(agent_oplogs_dir(repo_path))?;
+    fs::create_dir_all(&agent_oplogs_dir)?;
     fs::create_dir(&agent_dir)?;
 
     let op_heads_dir = agent_dir.join("op_heads");
@@ -140,7 +150,7 @@ pub async fn fork_agent_oplog(
     let fork_op_id = current_heads
         .first()
         .cloned()
-        .unwrap_or_else(|| OperationId::from_hex("0"));
+        .ok_or(BrevityError::NoHeads)?;
 
     // Initialize the forked store by forking from the source
     let forked_store = ForkedOpHeadsStore::fork_from(source, fork_op_id, &op_heads_dir)?;
@@ -162,7 +172,7 @@ pub fn agent_repo_loader(
 ) -> Result<RepoLoader, BrevityError> {
     validate_agent_name(agent_name)?;
 
-    let op_heads_dir = agent_op_heads_path(repo_path, agent_name);
+    let op_heads_dir = agent_op_heads_path(repo_path, agent_name)?;
     if !op_heads_dir.exists() {
         return Err(BrevityError::NotFound(agent_name.to_string()));
     }
@@ -180,8 +190,8 @@ pub fn agent_repo_loader(
 
 /// Merge an agent's final op head(s) back into the shared store.
 ///
-/// Uses `RepoLoader::merge_operations()` to create a merge operation, then
-/// publishes it to the shared `op_heads_store`.
+/// Uses `RepoLoader::merge_agent_operations()` to create a merge operation,
+/// then publishes it to the shared `op_heads_store`.
 pub async fn merge_agent_oplog(
     base_loader: &RepoLoader,
     repo_path: &Path,
@@ -189,7 +199,7 @@ pub async fn merge_agent_oplog(
 ) -> Result<Operation, BrevityError> {
     validate_agent_name(agent_name)?;
 
-    let op_heads_dir = agent_op_heads_path(repo_path, agent_name);
+    let op_heads_dir = agent_op_heads_path(repo_path, agent_name)?;
     if !op_heads_dir.exists() {
         return Err(BrevityError::NotFound(agent_name.to_string()));
     }
@@ -205,23 +215,25 @@ pub async fn merge_agent_oplog(
     // Load all operations (agent + shared)
     let mut all_ops = Vec::new();
     for id in &shared_head_ids {
-        all_ops.push(base_loader.load_operation(id)?);
+        all_ops.push(base_loader.load_operation(id).await?);
     }
     for id in &agent_head_ids {
         // Skip if already in shared (no-op fork with no agent work)
         if !shared_head_ids.contains(id) {
-            all_ops.push(base_loader.load_operation(id)?);
+            all_ops.push(base_loader.load_operation(id).await?);
         }
     }
 
     // If only shared heads (agent didn't diverge), just return the current head
     if all_ops.len() <= shared_head_ids.len() {
-        return Ok(all_ops.into_iter().next().unwrap());
+        return all_ops.into_iter().next().ok_or(BrevityError::NoHeads);
     }
 
     // Merge all operations
     let description = format!("merge agent {agent_name} oplog");
-    let merged_op = base_loader.merge_operations(all_ops, Some(&description))?;
+    let merged_op = base_loader
+        .merge_agent_operations(all_ops, Some(&description))
+        .await?;
 
     // Publish to the shared op_heads_store
     let _lock = shared_store.lock().await?;
@@ -234,7 +246,7 @@ pub async fn merge_agent_oplog(
 
 /// List all agent oplog directories.
 pub fn list_agent_oplogs(repo_path: &Path) -> Result<Vec<String>, BrevityError> {
-    let dir = agent_oplogs_dir(repo_path);
+    let dir = agent_oplogs_dir(repo_path)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -256,7 +268,7 @@ pub fn list_agent_oplogs(repo_path: &Path) -> Result<Vec<String>, BrevityError> 
 pub fn cleanup_agent_oplog(repo_path: &Path, agent_name: &str) -> Result<(), BrevityError> {
     validate_agent_name(agent_name)?;
 
-    let agent_dir = agent_oplogs_dir(repo_path).join(agent_name);
+    let agent_dir = agent_oplogs_dir(repo_path)?.join(agent_name);
     if !agent_dir.exists() {
         return Err(BrevityError::NotFound(agent_name.to_string()));
     }

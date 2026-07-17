@@ -218,22 +218,30 @@ pub struct Commit {
 
     // Hox metadata (all optional for backwards compatibility)
     // Skipped from default serde to maintain backwards compatibility with existing tools
+    /// Scheduling priority, where zero is the highest priority.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i32>, // 0=Critical, 1=High, 2=Medium, 3=Low
+    pub priority: Option<i32>,
+    /// Workflow status, such as `open`, `in_progress`, or `blocked`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>, // "open", "in_progress", "blocked", etc.
+    pub status: Option<String>,
+    /// Agent identifier associated with this commit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>, // Agent identifier (e.g., "agent-42")
+    pub agent: Option<String>,
+    /// Orchestrator identifier associated with this commit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub orchestrator: Option<String>, // Orchestrator identifier (e.g., "O-A-1")
+    pub orchestrator: Option<String>,
+    /// Message target, which may contain a glob pattern.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub msg_to: Option<String>, // Message target (supports glob patterns)
+    pub msg_to: Option<String>,
+    /// Message category, such as `mutation`, `info`, or `align_request`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub msg_type: Option<String>, // "mutation", "info", "align_request"
+    pub msg_type: Option<String>,
+    /// Current loop iteration.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub iteration: Option<u32>, // Current loop iteration
+    pub iteration: Option<u32>,
+    /// Maximum number of loop iterations allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_iterations: Option<u32>, // Maximum loop iterations allowed
+    pub max_iterations: Option<u32>,
 }
 
 /// An individual copy event, from file A -> B.

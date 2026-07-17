@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "brevity")]
-
 use std::path::Path;
 
 use jj_lib::brevity;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_heads_store::OpHeadsStore;
+use jj_lib::op_heads_store::OpHeadsStore as _;
 use pollster::FutureExt as _;
 use testutils::TestRepo;
 use testutils::write_random_commit;
@@ -108,12 +106,12 @@ fn test_agent_repo_loader() {
 
     // Get an agent repo loader
     let agent_loader = brevity::agent_repo_loader(repo.loader(), repo_path, "agent-0").unwrap();
-    let agent_repo = agent_loader.load_at_head().unwrap();
+    let agent_repo = agent_loader.load_at_head().block_on().unwrap();
 
     // Commit via the agent repo
     let mut tx = agent_repo.start_transaction();
     write_random_commit(tx.repo_mut());
-    tx.commit("agent transaction").unwrap();
+    tx.commit("agent transaction").block_on().unwrap();
 
     // Shared store should be unchanged
     let shared_heads_dir = repo_path.join("op_heads").join("heads");
@@ -147,10 +145,10 @@ fn test_merge_agent_oplog() {
 
     // Agent commits a change
     let agent_loader = brevity::agent_repo_loader(repo.loader(), repo_path, "agent-0").unwrap();
-    let agent_repo = agent_loader.load_at_head().unwrap();
+    let agent_repo = agent_loader.load_at_head().block_on().unwrap();
     let mut tx = agent_repo.start_transaction();
     let agent_commit = write_random_commit(tx.repo_mut());
-    tx.commit("agent work").unwrap();
+    tx.commit("agent work").block_on().unwrap();
 
     // Merge the agent's oplog back
     let merged_op = brevity::merge_agent_oplog(repo.loader(), repo_path, "agent-0")
@@ -161,7 +159,7 @@ fn test_merge_agent_oplog() {
     assert_ne!(merged_op.id(), repo.op_id());
 
     // Reload the shared repo and verify the agent's commit is visible
-    let reloaded = repo.loader().load_at_head().unwrap();
+    let reloaded = repo.loader().load_at_head().block_on().unwrap();
     assert!(reloaded.view().heads().contains(agent_commit.id()));
 }
 
@@ -181,21 +179,21 @@ fn test_multiple_agents_isolated() {
 
     // Agent 0 commits
     let loader0 = brevity::agent_repo_loader(repo.loader(), repo_path, "agent-0").unwrap();
-    let repo0 = loader0.load_at_head().unwrap();
+    let repo0 = loader0.load_at_head().block_on().unwrap();
     let mut tx0 = repo0.start_transaction();
     let commit0 = write_random_commit(tx0.repo_mut());
-    tx0.commit("agent-0 work").unwrap();
+    tx0.commit("agent-0 work").block_on().unwrap();
 
     // Agent 1 commits
     let loader1 = brevity::agent_repo_loader(repo.loader(), repo_path, "agent-1").unwrap();
-    let repo1 = loader1.load_at_head().unwrap();
+    let repo1 = loader1.load_at_head().block_on().unwrap();
     let mut tx1 = repo1.start_transaction();
     let commit1 = write_random_commit(tx1.repo_mut());
-    tx1.commit("agent-1 work").unwrap();
+    tx1.commit("agent-1 work").block_on().unwrap();
 
     // Neither agent sees the other's commit
-    let repo0_view = loader0.load_at_head().unwrap();
-    let repo1_view = loader1.load_at_head().unwrap();
+    let repo0_view = loader0.load_at_head().block_on().unwrap();
+    let repo1_view = loader1.load_at_head().block_on().unwrap();
     assert!(repo0_view.view().heads().contains(commit0.id()));
     assert!(!repo0_view.view().heads().contains(commit1.id()));
     assert!(repo1_view.view().heads().contains(commit1.id()));
@@ -210,7 +208,7 @@ fn test_multiple_agents_isolated() {
         .unwrap();
 
     // Both commits should be visible in the shared repo
-    let merged = repo.loader().load_at_head().unwrap();
+    let merged = repo.loader().load_at_head().block_on().unwrap();
     assert!(merged.view().heads().contains(commit0.id()));
     assert!(merged.view().heads().contains(commit1.id()));
 }

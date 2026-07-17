@@ -948,6 +948,9 @@ Starts an editor to let you edit the description of changes. The editor will be 
 * `--set-msg-type <TYPE>` — Set message type (mutation, info, align_request)
 * `--set-loop-iteration <ITERATION>` — Set loop iteration number
 * `--set-loop-max-iterations <MAX_ITERATIONS>` — Set max loop iterations
+* `--metadata-only` — Write metadata to the operation store without advancing op heads.
+
+   This is only valid with Hox metadata flags. The unpublished operation ID is printed so an orchestrator can explicitly integrate it later.
 
 
 

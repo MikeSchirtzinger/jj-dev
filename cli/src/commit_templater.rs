@@ -1396,8 +1396,8 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         "status",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
-            let out_property = self_property
-                .map(|commit| commit.status().unwrap_or_default().to_owned());
+            let out_property =
+                self_property.map(|commit| commit.status().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
@@ -1405,8 +1405,8 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         "agent",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
-            let out_property = self_property
-                .map(|commit| commit.agent().unwrap_or_default().to_owned());
+            let out_property =
+                self_property.map(|commit| commit.agent().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
@@ -1414,8 +1414,8 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         "orchestrator",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
-            let out_property = self_property
-                .map(|commit| commit.orchestrator().unwrap_or_default().to_owned());
+            let out_property =
+                self_property.map(|commit| commit.orchestrator().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
@@ -1423,8 +1423,8 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         "msg_to",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
-            let out_property = self_property
-                .map(|commit| commit.msg_to().unwrap_or_default().to_owned());
+            let out_property =
+                self_property.map(|commit| commit.msg_to().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
@@ -1432,8 +1432,8 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         "msg_type",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
-            let out_property = self_property
-                .map(|commit| commit.msg_type().unwrap_or_default().to_owned());
+            let out_property =
+                self_property.map(|commit| commit.msg_type().unwrap_or_default().to_owned());
             Ok(out_property.into_dyn_wrapped())
         },
     );
